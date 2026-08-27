@@ -1,0 +1,6 @@
+{
+  "container.example.machine": "試験機械",
+  "gui.example.machine.primary_action": "処理A",
+  "gui.example.machine.secondary_action": "処理B",
+  "gui.example.machine.power": "電力: %s"
+}

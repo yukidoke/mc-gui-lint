@@ -1,0 +1,22 @@
+{
+  "screen": {
+    "image_width": 176,
+    "image_height": 179
+  },
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "gui_scale": 3
+  },
+  "state": {
+    "progress_ticks": 333,
+    "duration_ticks": 1200,
+    "power_remaining": 16000
+  },
+  "slots": {
+    "slot_4": {
+      "item": "minecraft:coal",
+      "count": 9
+    }
+  }
+}

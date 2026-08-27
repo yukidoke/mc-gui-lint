@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mc-gui-lint"
+version = "0.1.0"
+description = "Static preview and layout linting for Minecraft container GUIs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "mc-gui-lint contributors" }
+]
+dependencies = [
+  "Pillow>=10.0",
+  "PyYAML>=6.0",
+]
+keywords = ["minecraft", "forge", "gui", "lint", "preview", "modding"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+mc-gui-lint = "mc_gui_lint.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mc_gui_lint*"]

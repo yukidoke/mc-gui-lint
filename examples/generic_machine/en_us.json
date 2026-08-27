@@ -1,0 +1,6 @@
+{
+  "container.example.machine": "Test Machine",
+  "gui.example.machine.primary_action": "Run A",
+  "gui.example.machine.secondary_action": "Run B",
+  "gui.example.machine.power": "Power: %s"
+}
