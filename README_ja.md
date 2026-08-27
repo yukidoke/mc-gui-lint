@@ -463,38 +463,6 @@ Minecraftで最終確認
 
 このツールはMinecraftでの確認を完全になくすのではなく、**実機確認回数を減らすこと**を目的としています。
 
-## GitHubへ公開する
-
-配布zipを展開し、
-
-```text
-README.md
-README_ja.md
-pyproject.toml
-mc_gui_lint/
-```
-
-などがリポジトリ直下にある状態で、以下を実行します。
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_NAME/mc-gui-lint.git
-git push -u origin main
-```
-
-リポジトリにはすでに、
-
-- `.gitignore`
-- MIT `LICENSE`
-- `pyproject.toml`
-- 汎用fixture
-- GitHub Actions
-
-が含まれています。
-
 ## 開発
 
 テスト:
