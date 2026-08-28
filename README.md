@@ -458,21 +458,6 @@ fix obvious layout issues
 verify in Minecraft
 ```
 
-## Publishing this repository to GitHub
-
-If you downloaded the prepared archive, extract it so that `README.md`, `pyproject.toml`, and `mc_gui_lint/` are at the repository root, then run:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_NAME/mc-gui-lint.git
-git push -u origin main
-```
-
-The repository already contains `.gitignore`, an MIT `LICENSE`, packaging metadata, generic fixtures, and a GitHub Actions test workflow.
-
 ## Development
 
 Run the tests:
