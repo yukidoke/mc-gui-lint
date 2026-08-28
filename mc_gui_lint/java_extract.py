@@ -95,6 +95,21 @@ class JavaIntEvaluator:
                 return a % b
             raise ValueError("unsupported binary operator")
 
+        if isinstance(node, ast.Attribute):
+            parts: list[str] = []
+            current: ast.AST = node
+            while isinstance(current, ast.Attribute):
+                parts.append(current.attr)
+                current = current.value
+            if isinstance(current, ast.Name):
+                parts.append(current.id)
+                qualified = ".".join(reversed(parts))
+                if qualified in self.env:
+                    return int(self.env[qualified])
+            raise ValueError(
+                f"unknown qualified name {ast.unparse(node) if hasattr(ast, 'unparse') else ast.dump(node)}"
+            )
+
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             args = [self._eval_node(a) for a in node.args]
             if node.func.id == "max":
@@ -446,6 +461,63 @@ def _extract_java_string(expr: str) -> str | None:
         return "".join(out)
 
     return None
+
+def _extract_class_name(code: str) -> str | None:
+    match = re.search(
+        r"\b(?:public\s+)?(?:final\s+)?(?:class|record)\s+([A-Za-z_]\w*)",
+        code,
+    )
+    return match.group(1) if match else None
+
+
+def _extract_public_static_final_int_constants(
+    code: str,
+    class_name: str | None = None,
+    base_env: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """Extract safe cross-class primitive compile-time constants.
+
+    Only ``public static final`` integral primitives are considered. Values are
+    evaluated with ``JavaIntEvaluator`` so literals and expressions composed of
+    already-resolved constants are supported, while method calls and runtime
+    fields remain unresolved. Returned keys include both ``FIELD`` and, when a
+    class name is known, ``ClassName.FIELD``.
+    """
+    pattern = re.compile(
+        r"\bpublic\s+static\s+final\s+"
+        r"(?:int|long|short|byte)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);"
+    )
+    declarations = [(m.group(1), m.group(2).strip()) for m in pattern.finditer(code)]
+    env = dict(base_env or {})
+    resolved: dict[str, int] = {}
+
+    # Multiple passes allow constants to reference earlier/later constants in
+    # the same class without interpreting arbitrary Java execution.
+    for _ in range(max(1, len(declarations) + 1)):
+        changed = False
+        evaluator = JavaIntEvaluator(env)
+        for name, expr in declarations:
+            if name in resolved:
+                continue
+            try:
+                value = evaluator.eval(expr)
+            except Exception:
+                continue
+            resolved[name] = value
+            env[name] = value
+            if class_name:
+                env[f"{class_name}.{name}"] = value
+            changed = True
+        if not changed:
+            break
+
+    result: dict[str, int] = {}
+    for name, value in resolved.items():
+        result[name] = value
+        if class_name:
+            result[f"{class_name}.{name}"] = value
+    return result
+
 
 def _parse_assignments(code: str, evaluator: JavaIntEvaluator) -> None:
     # A few passes allow later locals to depend on earlier locals.
@@ -1338,7 +1410,33 @@ def extract_java(
     screen_code = _strip_comments(raw_screen)
     warnings: list[ExtractionWarning] = []
 
-    evaluator = JavaIntEvaluator({"imageWidth": 176, "imageHeight": 166})
+    # Cross-class constants are intentionally limited to the explicitly supplied
+    # Menu source. This covers natural references such as
+    # FleetCommandMenu.BUTTON_FORMATION without searching or executing an
+    # arbitrary source tree.
+    menu_code: str | None = None
+    menu_class_name: str | None = None
+    external_constants: dict[str, int] = {}
+    if menu_path is not None:
+        menu_path = Path(menu_path)
+        raw_menu = menu_path.read_text(encoding="utf-8")
+        menu_code = _strip_comments(raw_menu)
+        menu_class_name = _extract_class_name(menu_code)
+        external_constants.update(
+            _extract_public_static_final_int_constants(menu_code, menu_class_name)
+        )
+
+    screen_class_name = _extract_class_name(screen_code)
+    screen_constants = _extract_public_static_final_int_constants(
+        screen_code, screen_class_name, external_constants
+    )
+
+    evaluator = JavaIntEvaluator({
+        "imageWidth": 176,
+        "imageHeight": 166,
+        **external_constants,
+        **screen_constants,
+    })
     evaluator.env.update({
         "titleLabelX": 8,
         "titleLabelY": 6,
@@ -1466,11 +1564,8 @@ def extract_java(
         elements.append(button)
 
     menu_slots: list[dict[str, Any]] = []
-    if menu_path is not None:
-        menu_path = Path(menu_path)
-        raw_menu = menu_path.read_text(encoding="utf-8")
-        menu_code = _strip_comments(raw_menu)
-        menu_eval = JavaIntEvaluator()
+    if menu_path is not None and menu_code is not None:
+        menu_eval = JavaIntEvaluator(external_constants)
         _parse_assignments(menu_code, menu_eval)
         menu_slots = _extract_slots_recursive(menu_code, menu_eval.env, warnings)
         for ordinal, slot in enumerate(menu_slots):
