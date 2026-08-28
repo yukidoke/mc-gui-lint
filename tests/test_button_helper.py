@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 
 from mc_gui_lint.java_extract import extract_java
+from mc_gui_lint.config import parse_elements, parse_screen
+from mc_gui_lint.lint import lint_layout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +89,67 @@ class ButtonHelperTest(unittest.TestCase):
                 (buttons[0]["x"], buttons[0]["y"], buttons[0]["w"], buttons[0]["h"]),
                 (10, 12, 50, 20),
             )
+
+
+    def test_string_label_arguments_propagate_through_component_literal(self):
+        with tempfile.TemporaryDirectory() as td:
+            screen = Path(td) / "ArrowScreen.java"
+            screen.write_text(
+                '''class ArrowScreen extends AbstractContainerScreen<X> {
+ protected void init() {
+  addArrowButton(leftPos + 8, topPos + 20, "<");
+  addArrowButton(leftPos + 28, topPos + 20, ">");
+  addArrowButton(leftPos + 48, topPos + 20, "<<");
+  addArrowButton(leftPos + 68, topPos + 20, ">>");
+ }
+ private void addArrowButton(int x, int y, String label) {
+  addRenderableWidget(Button.builder(Component.literal(label), b -> {})
+      .bounds(x, y, 18, 20).build());
+ }
+}
+''',
+                encoding="utf-8",
+            )
+            doc = extract_java(screen)
+            buttons = [e for e in doc["elements"] if e["type"] == "button"]
+            self.assertEqual([b["text"] for b in buttons], ["<", ">", "<<", ">>"])
+            warnings = doc["_extraction"]["warnings"]
+            self.assertFalse(
+                any("UNRESOLVED_BUTTON" in warning for warning in warnings),
+                warnings,
+            )
+            lint_issues = lint_layout(
+                parse_screen(doc),
+                parse_elements(doc),
+                [],
+                doc.get("state", {}),
+                doc.get("widgets", {}),
+            )
+            self.assertFalse(
+                any(issue.code == "BUTTON_TEXT_OVERFLOW" for issue in lint_issues),
+                lint_issues,
+            )
+
+    def test_static_string_concat_in_helper_label_is_resolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            screen = Path(td) / "ConcatScreen.java"
+            screen.write_text(
+                '''class ConcatScreen extends AbstractContainerScreen<X> {
+ protected void init() {
+  addArrowButton(leftPos + 8, topPos + 20, "<");
+ }
+ private void addArrowButton(int x, int y, String label) {
+  addRenderableWidget(Button.builder(Component.literal(label + label), b -> {})
+      .bounds(x, y, 20, 20).build());
+ }
+}
+''',
+                encoding="utf-8",
+            )
+            doc = extract_java(screen)
+            buttons = [e for e in doc["elements"] if e["type"] == "button"]
+            self.assertEqual(len(buttons), 1)
+            self.assertEqual(buttons[0]["text"], "<<")
 
 
 if __name__ == "__main__":

@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mc-gui-lint"
-version = "0.1.3"
+version = "0.1.4"
 description = "Static preview and layout linting for Minecraft container GUIs"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "mc-gui-lint contributors" }]
+authors = [{ name = "yukidoke" }]
 dependencies = ["Pillow>=10.0", "PyYAML>=6.0"]
 keywords = ["minecraft", "forge", "gui", "lint", "preview", "modding"]
 classifiers = [

@@ -442,7 +442,7 @@ def _extract_java_string(expr: str) -> str | None:
         return label
 
     # Useful heuristic for `"Energy: " + menu.getPower() + " FE"`.
-    parts = re.split(r"\s*\+\s*", expr)
+    parts = _split_top_level_concat(expr)
     if len(parts) > 1:
         out: list[str] = []
         for part in parts:
@@ -964,6 +964,47 @@ def _resolve_bound_expression(expr: str, expression_env: dict[str, str]) -> str:
     return current
 
 
+def _resolve_button_text_expression(
+    expr: str,
+    expression_env: dict[str, str],
+) -> str:
+    """Resolve safe helper-bound values used by a button label.
+
+    Whole-expression forwarding (``Button.builder(label, ...)``) was already
+    supported by :func:`_resolve_bound_expression`.  This adds the equally
+    common ``Component.literal(label)`` form, including top-level string
+    concatenations whose individual terms are helper parameters.
+
+    The substitution is intentionally syntax-directed: only identifiers that
+    are already present in ``expression_env`` are replaced.  No arbitrary Java
+    method calls or runtime string expressions are evaluated.
+    """
+    current = _resolve_bound_expression(expr, expression_env)
+
+    literal = re.fullmatch(
+        r"((?:Component\.)?literal)\s*\((.*)\)",
+        current,
+        flags=re.S,
+    )
+    if literal is None:
+        return current
+
+    args = _split_args(literal.group(2))
+    if len(args) != 1:
+        return current
+
+    parts = _split_top_level_concat(args[0])
+    if not parts:
+        return current
+
+    resolved_parts = [
+        _resolve_bound_expression(part, expression_env)
+        for part in parts
+    ]
+    inner = " + ".join(resolved_parts)
+    return f"{literal.group(1)}({inner})"
+
+
 def _button_relevant_methods(
     methods: dict[str, list[JavaMethod]],
     max_depth: int = 3,
@@ -1078,7 +1119,7 @@ def _extract_buttons_from_screen(
             return max(close_bounds + 1, statement_end)
 
         text_expr = builder_args[0] if builder_args else ""
-        text_expr = _resolve_bound_expression(text_expr, expression_env)
+        text_expr = _resolve_button_text_expression(text_expr, expression_env)
         text = _extract_java_string(text_expr) if text_expr else ""
         text = text or (f"⟦{text_expr.strip()[:60]}⟧" if text_expr else "")
 
