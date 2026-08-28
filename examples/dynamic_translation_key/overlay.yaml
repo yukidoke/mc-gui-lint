@@ -1,0 +1,16 @@
+state:
+  formation: 0
+
+presets:
+  formation_0:
+    state: { formation: 0 }
+  formation_1:
+    state: { formation: 1 }
+  formation_2:
+    state: { formation: 2 }
+  formation_3:
+    state: { formation: 3 }
+  formation_4:
+    state: { formation: 4 }
+  formation_5:
+    state: { formation: 5 }

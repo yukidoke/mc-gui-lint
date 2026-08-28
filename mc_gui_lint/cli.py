@@ -17,7 +17,7 @@ from .config import (
 )
 from .java_extract import extract_java, extract_menu_java
 from .lint import lint_layout
-from .localization import apply_language, load_language
+from .localization import apply_language, load_language, resolve_dynamic_translations
 from .renderer import render
 from .runtime_dump import apply_runtime_dump, load_runtime_dump
 from .watch import FileWatcher, normalize_watch_paths
@@ -40,8 +40,20 @@ def _load_source(source: Path, menu: Path | None, overlay: Path | None, runtime_
     return doc
 
 
-def run_one(source: Path, doc: dict, preset: str | None, output_dir: Path) -> tuple[str, list]:
+def run_one(
+    source: Path,
+    doc: dict,
+    preset: str | None,
+    output_dir: Path,
+    translations: dict[str, str] | None = None,
+    locale: str | None = None,
+) -> tuple[str, list, list[str]]:
     resolved = resolve_preset(doc, preset)
+    if translations is not None and locale is not None:
+        resolved = resolve_dynamic_translations(resolved, translations, locale)
+    runtime_localization_warnings = list(
+        (resolved.get("_localization") or {}).get("warnings") or []
+    )
     screen = parse_screen(resolved)
     viewport = parse_viewport(resolved)
     elements = parse_elements(resolved)
@@ -55,10 +67,17 @@ def run_one(source: Path, doc: dict, preset: str | None, output_dir: Path) -> tu
     name = preset or "default"
     render(screen, viewport, elements, menu_slots, state, slots, widgets, issues, output_dir / f"{name}.png", debug=False)
     render(screen, viewport, elements, menu_slots, state, slots, widgets, issues, output_dir / f"{name}.debug.png", debug=True)
-    return name, issues
+    return name, issues, runtime_localization_warnings
 
 
-def _run_document(source: Path, doc: dict, args, output_dir: Path, label: str | None = None) -> tuple[int, int, list[str]]:
+def _run_document(
+    source: Path,
+    doc: dict,
+    args,
+    output_dir: Path,
+    label: str | None = None,
+    translations: dict[str, str] | None = None,
+) -> tuple[int, int, list[str]]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     extraction_warnings = (doc.get("_extraction") or {}).get("warnings") or []
@@ -85,7 +104,16 @@ def _run_document(source: Path, doc: dict, args, output_dir: Path, label: str | 
 
     total_errors = total_warnings = 0
     for preset in names:
-        name, issues = run_one(source, doc, preset, output_dir)
+        name, issues, preset_localization_warnings = run_one(
+            source, doc, preset, output_dir, translations, label
+        )
+        dynamic_warnings = [
+            warning
+            for warning in preset_localization_warnings
+            if warning not in localization_warnings
+        ]
+        for warning in dynamic_warnings:
+            print(f"{prefix}[LANG] {name}: {warning}")
         errors = sum(i.severity == "ERROR" for i in issues)
         warnings = sum(i.severity == "WARNING" for i in issues)
         total_errors += errors
@@ -93,6 +121,9 @@ def _run_document(source: Path, doc: dict, args, output_dir: Path, label: str | 
         status = "OK" if errors == 0 else "FAIL"
         print(f"{prefix}[{status}] {name}: {errors} errors, {warnings} warnings")
         report.append(f"=== {name} ===")
+        if dynamic_warnings:
+            report.append("Localization warnings:")
+            report.extend(f"  {warning}" for warning in dynamic_warnings)
         report.extend(issue.format(n) for n, issue in enumerate(issues, 1)) if issues else report.append("No issues.")
         report.append("")
 
@@ -106,16 +137,19 @@ def _execute_once(args) -> int:
 
     base_doc = _load_source(args.source, args.menu, args.overlay, args.runtime_dump)
 
-    variants: list[tuple[str | None, dict]] = []
+    variants: list[tuple[str | None, dict, dict[str, str] | None]] = []
     if args.lang:
         for lang_path in args.lang:
             locale = lang_path.stem
-            variants.append((locale, apply_language(base_doc, load_language(lang_path), locale)))
+            translations = load_language(lang_path)
+            variants.append(
+                (locale, apply_language(base_doc, translations, locale), translations)
+            )
     else:
-        variants.append((None, base_doc))
+        variants.append((None, base_doc, None))
 
     grand_errors = 0
-    for locale, doc in variants:
+    for locale, doc, translations in variants:
         output_dir = args.output / locale if locale else args.output
 
         if args.dump_ir:
@@ -125,7 +159,7 @@ def _execute_once(args) -> int:
             dump.parent.mkdir(parents=True, exist_ok=True)
             dump.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-        errors, _, _ = _run_document(args.source, doc, args, output_dir, locale)
+        errors, _, _ = _run_document(args.source, doc, args, output_dir, locale, translations)
         grand_errors += errors
 
     return 1 if grand_errors else 0

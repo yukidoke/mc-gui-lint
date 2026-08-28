@@ -207,6 +207,138 @@ def _state_placeholder(expr: str) -> str | None:
     return None
 
 
+
+def _menu_state_placeholder(expr: str) -> str | None:
+    """Return a state placeholder only for a no-arg Menu getter/method."""
+    expr = expr.strip()
+
+    getter = re.fullmatch(
+        r"(?:this\.)?menu\.get([A-Z][A-Za-z0-9_]*)\s*\(\s*\)",
+        expr,
+    )
+    if getter:
+        return "{" + _snake(getter.group(1)) + "}"
+
+    method = re.fullmatch(
+        r"(?:this\.)?menu\.([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)",
+        expr,
+    )
+    if method:
+        return "{" + _snake(method.group(1)) + "}"
+    return None
+
+
+def _split_top_level_concat(expr: str) -> list[str]:
+    """Split a Java expression on top-level ``+`` operators only."""
+    parts: list[str] = []
+    start = 0
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    pairs = {")": "(", "]": "[", "}": "{"}
+
+    for i, ch in enumerate(expr):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+
+        if ch in ('"', "'"):
+            quote = ch
+            continue
+        if ch in "([{":
+            stack.append(ch)
+            continue
+        if ch in ")]}":
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+            continue
+        if ch == "+" and not stack:
+            parts.append(expr[start:i].strip())
+            start = i + 1
+
+    parts.append(expr[start:].strip())
+    return [part for part in parts if part]
+
+
+def _extract_dynamic_translation_key_template(expr: str) -> str | None:
+    """Extract a safe dynamic translation-key template.
+
+    Accepted form is intentionally narrow: top-level concatenation of Java
+    string literals and no-arg Menu accessors, for example::
+
+        "gui.example.formation." + menu.formation()
+
+    becomes ``gui.example.formation.{formation}``.
+    """
+    parts = _split_top_level_concat(expr.strip())
+    if len(parts) < 2:
+        return None
+
+    out: list[str] = []
+    has_literal = False
+    has_state = False
+    for part in parts:
+        if re.fullmatch(r'"(?:\\.|[^"\\])*"', part, flags=re.S):
+            try:
+                out.append(str(ast.literal_eval(part)))
+            except Exception:
+                return None
+            has_literal = True
+            continue
+
+        placeholder = _menu_state_placeholder(part)
+        if placeholder is not None:
+            out.append(placeholder)
+            has_state = True
+            continue
+
+        return None
+
+    if not (has_literal and has_state):
+        return None
+    return "".join(out)
+
+
+def _extract_dynamic_translatable_spec(expr: str) -> tuple[str, list[str]] | None:
+    """Return (dynamic key template, argument templates) for translatable()."""
+    expr = expr.strip()
+    tm = re.fullmatch(r"(?:Component\.)?translatable\s*\((.*)\)", expr, flags=re.S)
+    if not tm:
+        return None
+
+    args = _split_args(tm.group(1))
+    if not args:
+        return None
+
+    key_template = _extract_dynamic_translation_key_template(args[0])
+    if key_template is None:
+        return None
+
+    values: list[str] = []
+    for arg in args[1:]:
+        arg = arg.strip()
+        ph = _state_placeholder(arg)
+        if ph is not None:
+            values.append(ph)
+            continue
+        if re.fullmatch(r'"(?:\\.|[^"\\])*"', arg, flags=re.S):
+            try:
+                values.append(str(ast.literal_eval(arg)))
+            except Exception:
+                values.append(arg.strip('"'))
+            continue
+        if re.fullmatch(r"-?\d+[lL]?", arg):
+            values.append(re.sub(r"[lL]$", "", arg))
+            continue
+        values.append("{?}")
+    return key_template, values
+
+
 def _extract_translatable_spec(expr: str) -> tuple[str, list[str]] | None:
     """Return (translation key, argument templates) for Component.translatable."""
     expr = expr.strip()
@@ -277,6 +409,10 @@ def _extract_java_string(expr: str) -> str | None:
             except Exception:
                 key = args[0].strip('"')
         if key is None:
+            dynamic = _extract_dynamic_translation_key_template(args[0])
+            if dynamic is not None:
+                # Keep a visible deterministic template until locale+state are known.
+                return dynamic
             return None
         label = key.rsplit('.', 1)[-1].replace('_', ' ')
         dyn: list[str] = []
@@ -733,6 +869,360 @@ def _extract_slot_frames_from_screen(
     return frames
 
 
+
+def _resolve_bound_expression(expr: str, expression_env: dict[str, str]) -> str:
+    """Resolve a helper parameter when the whole expression is that parameter.
+
+    This is intentionally conservative. It is used for non-numeric values such
+    as a ``Component label`` passed into a button helper. Numeric parameters are
+    handled by ``JavaIntEvaluator`` instead.
+    """
+    current = expr.strip()
+    seen: set[str] = set()
+    for _ in range(4):
+        if current in seen:
+            break
+        seen.add(current)
+        if not re.fullmatch(r"[A-Za-z_]\w*", current):
+            break
+        replacement = expression_env.get(current)
+        if replacement is None:
+            break
+        current = replacement.strip()
+    return current
+
+
+def _button_relevant_methods(
+    methods: dict[str, list[JavaMethod]],
+    max_depth: int = 3,
+) -> set[str]:
+    """Return methods that directly or transitively contain a Button.builder.
+
+    The fixed-point expansion is depth-limited so arbitrary call graphs are not
+    interpreted. This exists only to identify small UI helper chains.
+    """
+    relevant = {
+        name
+        for name, overloads in methods.items()
+        if any(re.search(r"\bButton\s*\.\s*builder\s*\(", method.body) for method in overloads)
+    }
+    for _ in range(max_depth):
+        before = set(relevant)
+        for name, overloads in methods.items():
+            if name in relevant:
+                continue
+            for method in overloads:
+                if any(
+                    re.search(rf"\b{re.escape(target)}\s*\(", method.body)
+                    for target in relevant
+                ):
+                    relevant.add(name)
+                    break
+        if relevant == before:
+            break
+    return relevant
+
+
+def _extract_buttons_from_screen(
+    code: str,
+    evaluator: JavaIntEvaluator,
+    warnings: list[ExtractionWarning],
+    max_depth: int = 3,
+) -> list[dict[str, Any]]:
+    """Extract buttons from ``init`` and small helper chains.
+
+    Supported helper expansion is deliberately narrow:
+
+    * helper calls must resolve to a method declared in the same Screen class;
+    * integer arguments are evaluated using the existing coordinate evaluator;
+    * non-integer parameters may be forwarded as whole expressions (notably a
+      ``Component`` label);
+    * recursion is capped by ``max_depth``;
+    * unresolved helper arguments produce a warning instead of speculative
+      execution.
+
+    This allows natural code such as ``addButton(x, y, label)`` without making
+    the linter an arbitrary Java interpreter.
+    """
+    methods = _extract_methods(code)
+    relevant = _button_relevant_methods(methods, max_depth=max_depth)
+    buttons: list[dict[str, Any]] = []
+
+    def parse_button_builder(
+        body: str,
+        start: int,
+        local_eval: JavaIntEvaluator,
+        expression_env: dict[str, str],
+        line_offset: int,
+        origin_line: int | None,
+        helper_name: str | None,
+    ) -> int:
+        open_builder = body.find("(", start)
+        try:
+            close_builder = _matching(body, open_builder)
+        except ValueError:
+            return start + 1
+
+        builder_args = _split_args(body[open_builder + 1:close_builder])
+        try:
+            statement_end = _statement_end(body, start)
+        except Exception:
+            statement_end = min(len(body), close_builder + 800)
+
+        chain = body[close_builder + 1:statement_end]
+        bounds_match = re.search(r"\.\s*bounds\s*\(", chain)
+        if not bounds_match:
+            return max(close_builder + 1, statement_end)
+
+        open_bounds = close_builder + 1 + chain.find("(", bounds_match.start())
+        try:
+            close_bounds = _matching(body, open_bounds)
+        except ValueError:
+            return max(close_builder + 1, statement_end)
+
+        bounds_args = _split_args(body[open_bounds + 1:close_bounds])
+        source_line = origin_line or (line_offset + _line_of(body, start))
+        if len(bounds_args) != 4:
+            warnings.append(
+                ExtractionWarning(
+                    "UNRESOLVED_BUTTON_BOUNDS",
+                    f"Button.bounds expected 4 arguments, got {len(bounds_args)}",
+                    source_line,
+                )
+            )
+            return max(close_bounds + 1, statement_end)
+
+        try:
+            x, y, w, h = [local_eval.eval(value) for value in bounds_args]
+        except Exception as exc:
+            context = f" through helper {helper_name}()" if helper_name else ""
+            warnings.append(
+                ExtractionWarning(
+                    "UNRESOLVED_BUTTON_BOUNDS",
+                    f"could not evaluate Button.bounds{context}: {exc}",
+                    source_line,
+                )
+            )
+            return max(close_bounds + 1, statement_end)
+
+        text_expr = builder_args[0] if builder_args else ""
+        text_expr = _resolve_bound_expression(text_expr, expression_env)
+        text = _extract_java_string(text_expr) if text_expr else ""
+        text = text or (f"⟦{text_expr.strip()[:60]}⟧" if text_expr else "")
+
+        button: dict[str, Any] = {
+            "type": "button",
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "text": text,
+            "click_bounds": {"x": x, "y": y, "w": w, "h": h},
+            "source_line": source_line,
+        }
+        if helper_name:
+            button["helper"] = helper_name
+            button["helper_source_line"] = line_offset + _line_of(body, start)
+
+        translatable = _extract_translatable_spec(text_expr)
+        if translatable is not None:
+            button["translation_key"], button["translation_args"] = translatable
+        else:
+            dynamic_translatable = _extract_dynamic_translatable_spec(text_expr)
+            if dynamic_translatable is not None:
+                button["translation_key_template"], button["translation_args"] = dynamic_translatable
+
+        buttons.append(button)
+        return max(close_bounds + 1, statement_end)
+
+    def walk(
+        body: str,
+        env: dict[str, int],
+        expression_env: dict[str, str],
+        line_offset: int,
+        stack: tuple[str, ...],
+        depth: int,
+        origin_line: int | None = None,
+    ) -> None:
+        local_eval = JavaIntEvaluator(env)
+        _parse_assignments(body, local_eval)
+
+        helper_names = sorted(
+            [name for name in relevant if name not in stack],
+            key=len,
+            reverse=True,
+        )
+        helper_part = (
+            r"|(?:" + "|".join(re.escape(name) for name in helper_names) + r")\s*\("
+            if helper_names
+            else ""
+        )
+        token = re.compile(
+            r"\b(for\s*\(|Button\s*\.\s*builder\s*\(" + helper_part + r")"
+        )
+
+        pos = 0
+        while True:
+            match = token.search(body, pos)
+            if not match:
+                break
+            token_text = match.group(1)
+
+            if token_text.startswith("for"):
+                open_paren = body.find("(", match.start())
+                try:
+                    close_paren = _matching(body, open_paren)
+                except ValueError:
+                    pos = match.end()
+                    continue
+                header = body[open_paren + 1:close_paren]
+                parsed = _parse_simple_for_header(header, local_eval)
+                body_start = _skip_ws(body, close_paren + 1)
+                try:
+                    body_end = _statement_end(body, body_start)
+                except Exception:
+                    pos = close_paren + 1
+                    continue
+                if parsed is None:
+                    warnings.append(
+                        ExtractionWarning(
+                            "UNRESOLVED_BUTTON_FOR",
+                            f"unsupported button helper for-loop: {header.strip()}",
+                            origin_line or (line_offset + _line_of(body, match.start())),
+                        )
+                    )
+                    pos = body_end
+                    continue
+
+                var, values = parsed
+                if body[body_start] == "{":
+                    nested = body[body_start + 1:body_end - 1]
+                    nested_start = body_start + 1
+                else:
+                    nested = body[body_start:body_end]
+                    nested_start = body_start
+                nested_offset = line_offset + _line_of(body, nested_start) - 1
+                for value in values:
+                    child_env = dict(local_eval.env)
+                    child_env[var] = value
+                    walk(
+                        nested,
+                        child_env,
+                        dict(expression_env),
+                        nested_offset,
+                        stack,
+                        depth,
+                        origin_line,
+                    )
+                pos = body_end
+                continue
+
+            if token_text.startswith("Button"):
+                pos = parse_button_builder(
+                    body,
+                    match.start(),
+                    local_eval,
+                    expression_env,
+                    line_offset,
+                    origin_line,
+                    stack[-1] if len(stack) > 1 else None,
+                )
+                continue
+
+            helper_name_match = re.match(r"([A-Za-z_]\w*)", token_text)
+            if helper_name_match is None:
+                pos = match.end()
+                continue
+            helper_name = helper_name_match.group(1)
+            call_line = origin_line or (line_offset + _line_of(body, match.start()))
+
+            if depth >= max_depth:
+                warnings.append(
+                    ExtractionWarning(
+                        "UNRESOLVED_BUTTON_HELPER_DEPTH",
+                        f"button helper expansion exceeded depth {max_depth}: {helper_name}()",
+                        call_line,
+                    )
+                )
+                open_paren = body.find("(", match.start())
+                try:
+                    pos = _matching(body, open_paren) + 1
+                except ValueError:
+                    pos = match.end()
+                continue
+
+            open_paren = body.find("(", match.start())
+            try:
+                close_paren = _matching(body, open_paren)
+            except ValueError:
+                pos = match.end()
+                continue
+            args = _split_args(body[open_paren + 1:close_paren])
+            overloads = methods.get(helper_name) or []
+            method = next((item for item in overloads if len(item.params) == len(args)), None)
+            if method is None:
+                warnings.append(
+                    ExtractionWarning(
+                        "UNRESOLVED_BUTTON_HELPER",
+                        f"no matching helper overload for {helper_name}({len(args)} args)",
+                        call_line,
+                    )
+                )
+                pos = close_paren + 1
+                continue
+
+            child_env = dict(local_eval.env)
+            child_expression_env = dict(expression_env)
+            unresolved_numeric: list[str] = []
+            for (ptype, pname), raw_arg in zip(method.params, args):
+                arg = _resolve_bound_expression(raw_arg, expression_env)
+                child_expression_env[pname] = arg
+                if re.search(r"\b(?:int|long|short|byte)\b", ptype):
+                    try:
+                        child_env[pname] = local_eval.eval(arg)
+                    except Exception:
+                        unresolved_numeric.append(f"{pname}={arg}")
+
+            if unresolved_numeric:
+                warnings.append(
+                    ExtractionWarning(
+                        "UNRESOLVED_BUTTON_HELPER_ARGUMENT",
+                        f"could not evaluate numeric argument(s) for {helper_name}(): "
+                        + ", ".join(unresolved_numeric),
+                        call_line,
+                    )
+                )
+
+            walk(
+                method.body,
+                child_env,
+                child_expression_env,
+                _line_of(code, method.body_start) - 1,
+                stack + (helper_name,),
+                depth + 1,
+                call_line,
+            )
+            pos = close_paren + 1
+
+    entries = methods.get("init") or []
+    if entries:
+        entry = entries[0]
+        walk(
+            entry.body,
+            evaluator.env,
+            {},
+            _line_of(code, entry.body_start) - 1,
+            ("init",),
+            0,
+        )
+    else:
+        # Preserve the old broad behavior for unusual Screens without init().
+        # Helpers are not expanded from this fallback root.
+        relevant.clear()
+        walk(code, evaluator.env, {}, 0, ("<root>",), 0)
+
+    return buttons
+
 def _java_argb(expr: str) -> list[int]:
     try:
         raw = int(expr.strip().replace("_", ""), 0) & 0xFFFFFFFF
@@ -959,46 +1449,20 @@ def extract_java(
         translatable = _extract_translatable_spec(text_expr)
         if translatable is not None:
             element["translation_key"], element["translation_args"] = translatable
+        else:
+            dynamic_translatable = _extract_dynamic_translatable_spec(text_expr)
+            if dynamic_translatable is not None:
+                element["translation_key_template"], element["translation_args"] = dynamic_translatable
         if len(args) >= 5:
             element["color"] = _java_argb(args[4])
         if name == "drawCenteredString":
             element["align"] = "center"
         elements.append(element)
 
-    # Button.builder(...).bounds(...)
-    button_pattern = re.compile(r"\bButton\s*\.\s*builder\s*\(")
-    for m in button_pattern.finditer(screen_code):
-        open_builder = screen_code.find("(", m.start())
-        try:
-            close_builder = _matching(screen_code, open_builder)
-        except ValueError:
-            continue
-        builder_args = _split_args(screen_code[open_builder + 1:close_builder])
-        after = screen_code[close_builder + 1:close_builder + 500]
-        bm = re.search(r"\.\s*bounds\s*\(", after)
-        if not bm:
-            continue
-        open_bounds = close_builder + 1 + after.find("(", bm.start())
-        try:
-            close_bounds = _matching(screen_code, open_bounds)
-        except ValueError:
-            continue
-        bounds_args = _split_args(screen_code[open_bounds + 1:close_bounds])
-        if len(bounds_args) != 4:
-            continue
-        try:
-            x, y, w, h = [evaluator.eval(v) for v in bounds_args]
-        except Exception as exc:
-            warnings.append(ExtractionWarning("UNRESOLVED_BUTTON_BOUNDS", f"could not evaluate Button.bounds: {exc}", _line_of(screen_code, m.start())))
-            continue
-        text_expr = builder_args[0] if builder_args else ""
-        text = _extract_java_string(text_expr) if builder_args else ""
-        text = text or (f"⟦{text_expr.strip()[:60]}⟧" if builder_args else "")
-        bid = next_id("button")
-        button = {"type":"button","id":bid,"x":x,"y":y,"w":w,"h":h,"text":text,"click_bounds":{"x":x,"y":y,"w":w,"h":h},"source_line":_line_of(screen_code,m.start())}
-        translatable = _extract_translatable_spec(text_expr)
-        if translatable is not None:
-            button["translation_key"], button["translation_args"] = translatable
+    # Button.builder(...).bounds(...) including small helper chains from init().
+    extracted_buttons = _extract_buttons_from_screen(screen_code, evaluator, warnings)
+    for button in extracted_buttons:
+        button["id"] = next_id("button")
         elements.append(button)
 
     menu_slots: list[dict[str, Any]] = []

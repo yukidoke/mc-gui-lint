@@ -247,6 +247,39 @@ Button.builder(Component.translatable("gui.example.action"), ...)
     .bounds(leftPos + 106, topPos + 24, 63, 20);
 ```
 
+### Button helper
+
+同じScreenクラス内にある単純なbutton helperは、`init()`から限定的に展開します。
+lintの都合でボタン矩形を重複して直書きする必要はありません。
+
+```java
+@Override
+protected void init() {
+    addActionButton(
+        leftPos + 8,
+        topPos + 20,
+        Component.translatable("gui.example.action")
+    );
+}
+
+private void addActionButton(int x, int y, Component label) {
+    addRenderableWidget(
+        Button.builder(label, button -> {})
+            .bounds(x, y, 44, 20)
+            .build()
+    );
+}
+```
+
+対応範囲は意図的に限定しています。
+
+- `int`などの数値引数は静的に評価できる必要があります
+- `Component label`のような値は、式全体をhelperへ安全に引き継げます
+- button helperのネストは小さな固定深度まで展開します
+- 任意のJavaコード実行は行いません
+
+数値引数を解決できない場合は座標を推測せず、`UNRESOLVED_BUTTON_HELPER_ARGUMENT` / `UNRESOLVED_BUTTON_BOUNDS`として警告します。
+
 また、典型的な `drawSlot(...)` などの単純な描画helperも展開します。
 
 安全に解決できない式については、推測で処理せず、
@@ -277,6 +310,26 @@ Minecraftのlanguage JSONを1つ以上指定できます。
 ```
 
 これにより、**日本語では収まるが英語でははみ出す**といったlocale依存のレイアウト問題を検出できます。
+
+## 動的translation key
+
+Minecraftでは次のような書き方も自然です。
+
+```java
+Component.translatable("gui.example.formation." + menu.formation())
+```
+
+`menu.formation()` がpreset / overlay / runtime dumpの**整数state**へ解決できる場合、`mc-gui-lint`はこれを次の安全なテンプレートとして抽出します。
+
+```text
+gui.example.formation.{formation}
+```
+
+その後、preset適用後に実際のtranslation keyへ展開してlang JSONを参照します。
+
+対応範囲は意図的に限定しており、トップレベルの文字列リテラル連結と、引数なしの `menu.foo()` / `menu.getFoo()` だけを許可します。より複雑なJava式は評価せず、従来どおりplaceholder警告として残します。
+
+6状態 × 日本語/英語の回帰fixtureを `examples/dynamic_translation_key/` に含めています。
 
 ## YAML / JSON入力
 
@@ -462,6 +515,38 @@ Minecraftで最終確認
 ```
 
 このツールはMinecraftでの確認を完全になくすのではなく、**実機確認回数を減らすこと**を目的としています。
+
+## GitHubへ公開する
+
+配布zipを展開し、
+
+```text
+README.md
+README_ja.md
+pyproject.toml
+mc_gui_lint/
+```
+
+などがリポジトリ直下にある状態で、以下を実行します。
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/YOUR_NAME/mc-gui-lint.git
+git push -u origin main
+```
+
+リポジトリにはすでに、
+
+- `.gitignore`
+- MIT `LICENSE`
+- `pyproject.toml`
+- 汎用fixture
+- GitHub Actions
+
+が含まれています。
 
 ## 開発
 

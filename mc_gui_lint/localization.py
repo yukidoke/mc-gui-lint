@@ -92,3 +92,77 @@ def apply_language(doc: dict[str, Any], translations: dict[str, str], locale: st
         "warnings": warnings,
     }
     return localized
+
+
+_DYNAMIC_KEY_TOKEN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_dynamic_key_template(
+    template: str,
+    state: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Resolve dynamic-key tokens using integer state values only."""
+    missing: list[str] = []
+    invalid: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in state:
+            missing.append(name)
+            return match.group(0)
+        value = state[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            invalid.append(name)
+            return match.group(0)
+        return str(value)
+
+    key = _DYNAMIC_KEY_TOKEN.sub(repl, template)
+    if missing:
+        return None, f"missing integer state: {', '.join(sorted(set(missing)))}"
+    if invalid:
+        return None, f"non-integer state: {', '.join(sorted(set(invalid)))}"
+    if _DYNAMIC_KEY_TOKEN.search(key):
+        return None, "unresolved state placeholder"
+    return key, None
+
+
+def resolve_dynamic_translations(
+    doc: dict[str, Any],
+    translations: dict[str, str],
+    locale: str,
+) -> dict[str, Any]:
+    """Resolve safe dynamic translation keys after preset/state expansion."""
+    localized = deepcopy(doc)
+    state = localized.get("state", {}) or {}
+    warnings: list[str] = []
+    resolved_count = 0
+
+    for element in localized.get("elements", []):
+        key_template = element.get("translation_key_template")
+        if not key_template:
+            continue
+
+        key, reason = _resolve_dynamic_key_template(str(key_template), state)
+        if key is None:
+            warnings.append(
+                f"UNRESOLVED_DYNAMIC_TRANSLATION_KEY: {key_template} ({reason})"
+            )
+            continue
+
+        translation = translations.get(key)
+        if translation is None:
+            warnings.append(f"MISSING_TRANSLATION: {key}")
+            continue
+
+        args = [str(v) for v in element.get("translation_args", [])]
+        element["translation_key"] = key
+        element["text"] = format_translation(translation, args)
+        element["locale"] = locale
+        resolved_count += 1
+
+    meta = localized.setdefault("_localization", {})
+    meta["locale"] = locale
+    meta["dynamic_resolved"] = resolved_count
+    existing = list(meta.get("warnings", []) or [])
+    meta["warnings"] = existing + warnings
+    return localized

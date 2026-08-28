@@ -262,6 +262,26 @@ The tool resolves `Component.translatable(...)` and handles common placeholders:
 
 This makes it possible to detect layouts that fit in one language but overflow in another.
 
+## Dynamic translation keys
+
+A common Minecraft pattern such as:
+
+```java
+Component.translatable("gui.example.formation." + menu.formation())
+```
+
+is supported when the Menu accessor resolves to an **integer state value** supplied by a preset, overlay, or runtime dump. The extractor stores a safe template such as:
+
+```text
+gui.example.formation.{formation}
+```
+
+and resolves the final key only after the selected preset has been applied.
+
+Only top-level concatenation of Java string literals and no-argument `menu.foo()` / `menu.getFoo()` accessors is accepted. More complex Java expressions remain unresolved and keep the normal placeholder warning behavior.
+
+A six-state, Japanese/English regression fixture is included under `examples/dynamic_translation_key/`.
+
 ## YAML / JSON input
 
 Java parsing is optional. You can describe a preview directly:
@@ -483,3 +503,46 @@ mc-gui-lint/
 MIT License. See [LICENSE](LICENSE).
 
 The fixtures under `examples/generic_machine/` were written specifically for this repository and are not copied from an external Minecraft mod.
+
+Screen-side support includes common patterns such as:
+
+```java
+graphics.fill(...);
+graphics.drawString(...);
+
+Button.builder(Component.translatable("gui.example.action"), ...)
+    .bounds(leftPos + 106, topPos + 24, 63, 20);
+```
+
+### Button helpers
+
+Small button helper chains declared in the same Screen class are expanded from `init()`.
+This lets application code keep reusable helpers instead of duplicating button rectangles just for the linter.
+
+```java
+@Override
+protected void init() {
+    addActionButton(
+        leftPos + 8,
+        topPos + 20,
+        Component.translatable("gui.example.action")
+    );
+}
+
+private void addActionButton(int x, int y, Component label) {
+    addRenderableWidget(
+        Button.builder(label, button -> {})
+            .bounds(x, y, 44, 20)
+            .build()
+    );
+}
+```
+
+Supported helper behavior is intentionally limited:
+
+- integer helper arguments must be statically evaluable;
+- whole-expression values such as a `Component label` can be forwarded into the helper;
+- nested button helpers are expanded up to a small fixed depth;
+- arbitrary Java execution is not attempted.
+
+If a numeric helper argument cannot be resolved, extraction falls back to `UNRESOLVED_BUTTON_HELPER_ARGUMENT` / `UNRESOLVED_BUTTON_BOUNDS` warnings instead of inventing coordinates.
