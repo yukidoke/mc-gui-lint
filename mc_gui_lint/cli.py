@@ -56,9 +56,9 @@ def run_one(
     )
     screen = parse_screen(resolved)
     viewport = parse_viewport(resolved)
-    elements = parse_elements(resolved)
-    menu_slots = parse_menu_slots(resolved)
     state = resolved.get("state", {}) or {}
+    elements = parse_elements(resolved, state)
+    menu_slots = parse_menu_slots(resolved)
     slots = resolved.get("slots", {}) or {}
     widgets = resolved.get("widgets", {}) or {}
 

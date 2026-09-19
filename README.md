@@ -357,6 +357,36 @@ graphics.pose().popPose();
 
 Transforms hidden behind helpers/lambdas or complex control flow are intentionally left to overlay hints.
 
+### Simple conditional rendering
+
+v0.1.8 tracks straightforward `if / else if / else` blocks in the same Java method and turns common Menu state checks into visibility conditions. This lets presets change which elements are actually rendered instead of only changing their text/value.
+
+```java
+if (menu.isWorking()) {
+    graphics.drawString(font, "Working", 8, 8, 0xFFFFFF);
+} else {
+    graphics.drawString(font, "Idle", 8, 8, 0xFFFFFF);
+}
+
+if (menu.getPower() > 0 && !menu.isBroken()) {
+    graphics.fill(8, 24, 40, 28, 0xFF00FF00);
+}
+```
+
+Supported condition syntax is intentionally small: no-argument Menu getters/methods, simple fields, `!`, `&&`, `||`, numeric/boolean literals, arithmetic, and comparison operators. The extracted IR records `visibility_conditions`, and `state`/preset values are applied before elements are parsed, linted, and rendered.
+
+```yaml
+presets:
+  idle:
+    state:
+      is_working: false
+  working:
+    state:
+      is_working: true
+```
+
+Unsupported conditions emit `UNRESOLVED_IF_CONDITION`. The affected element is kept visible rather than being hidden on an unsafe guess. Conditions propagated through helper/lambda calls are still out of scope.
+
 ## Overlay files
 
 Use `--overlay` when Java extraction gets most of the layout right but a small amount of information needs to be supplied manually:
@@ -510,7 +540,7 @@ Current limitations include:
 - `blit` is not fully reproduced
 - shaders are out of scope
 - 3D entity rendering is out of scope
-- arbitrary Java cannot be evaluated
+- arbitrary Java cannot be evaluated; conditional rendering only follows simple same-method `if / else` expressions
 - server/client synchronization itself is not tested
 - not every Minecraft widget is supported
 

@@ -407,6 +407,36 @@ graphics.pose().popPose();
 
 制御フローをまたぐ変換、補助メソッドやラムダの内部に隠れた変換までは追いません。そうしたケースは下記のoverlay補助設定で補完できます。
 
+### 単純な条件分岐描画
+
+v0.1.8では、同一Javaメソッド内の素直な `if / else if / else` を追跡し、Menuの状態参照を要素の表示条件として保持します。これによりpreset/stateによって文字列や値だけでなく、**実際に描画される要素そのもの**を切り替えられます。
+
+```java
+if (menu.isWorking()) {
+    graphics.drawString(font, "Working", 8, 8, 0xFFFFFF);
+} else {
+    graphics.drawString(font, "Idle", 8, 8, 0xFFFFFF);
+}
+
+if (menu.getPower() > 0 && !menu.isBroken()) {
+    graphics.fill(8, 24, 40, 28, 0xFF00FF00);
+}
+```
+
+対応する条件式は意図的に限定しており、引数なしのMenu getter/method、単純なfield、`!`、`&&`、`||`、数値・boolean literal、簡単な四則演算、比較演算を扱います。抽出IRには `visibility_conditions` が入り、preset/stateを解決した後に表示対象を絞ってからlint/renderします。
+
+```yaml
+presets:
+  idle:
+    state:
+      is_working: false
+  working:
+    state:
+      is_working: true
+```
+
+解釈できない条件は `UNRESOLVED_IF_CONDITION` として報告し、その要素は推測で消さず表示側に残します。呼び出し元の条件を補助メソッドやlambdaの内部へ伝播させる解析はまだ対象外です。
+
 ## Overlay
 
 Java静的解析でほとんど取れているものの、一部だけ手動で補いたい場合は `--overlay` を使います。
@@ -572,7 +602,7 @@ Minecraftの完全再現は目的としていません。
 - `blit` は完全再現していない
 - shaderは対象外
 - 3D Entity描画は対象外
-- 任意のJavaコードは評価できない
+- 任意のJavaコードは評価できない。条件分岐描画は同一メソッド内の単純な `if / else` のみ対応
 - server/client同期処理そのものは検証しない
 - Minecraftの全Widgetには対応していない
 

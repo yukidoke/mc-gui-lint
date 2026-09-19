@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from .conditions import evaluate_state_condition
 from .model import Element, MenuSlot, Screen, Viewport
 
 
@@ -85,7 +86,7 @@ def _rect_spec(value: Any, *, path: str) -> dict[str, float]:
     raise TypeError(f"{path} must be a mapping or [x, y, w, h]")
 
 
-def parse_elements(doc: dict[str, Any]) -> list[Element]:
+def parse_elements(doc: dict[str, Any], state: dict[str, Any] | None = None) -> list[Element]:
     """Parse GUI elements and attach optional overlay-only layout hints.
 
     Auxiliary configuration is deliberately kept outside the extracted
@@ -117,6 +118,20 @@ def parse_elements(doc: dict[str, Any]) -> list[Element]:
     screen_scale = float(doc.get("screen_scale", 1.0) or 1.0)
 
     for raw in doc.get("elements", []):
+        if state is not None:
+            visible = True
+            for clause in raw.get("visibility_conditions", []) or []:
+                expr = clause.get("expr") if isinstance(clause, dict) else None
+                expected = bool(clause.get("when", True)) if isinstance(clause, dict) else True
+                if not isinstance(expr, str):
+                    continue
+                actual = evaluate_state_condition(expr, state)
+                # Unknown/missing state deliberately keeps the element visible.
+                if actual is not None and actual != expected:
+                    visible = False
+                    break
+            if not visible:
+                continue
         known = {"type", "id", "x", "y", "w", "h"}
         data = {k: v for k, v in raw.items() if k not in known}
         element_id = str(raw["id"])

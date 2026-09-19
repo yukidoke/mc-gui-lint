@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .conditions import bind_numeric_constants, condition_names, normalize_java_condition
+
 
 @dataclass
 class ExtractionWarning:
@@ -651,6 +653,18 @@ def _statement_end(code: str, start: int) -> int:
         close_paren = _matching(code, open_paren)
         return _statement_end(code, close_paren + 1)
 
+    if re.match(r"if\b", code[start:]):
+        open_paren = code.find("(", start)
+        if open_paren < 0:
+            return start
+        close_paren = _matching(code, open_paren)
+        then_end = _statement_end(code, close_paren + 1)
+        after_then = _skip_ws(code, then_end)
+        else_match = re.match(r"else\b", code[after_then:])
+        if else_match:
+            return _statement_end(code, after_then + else_match.end())
+        return then_end
+
     stack: list[str] = []
     quote: str | None = None
     escaped = False
@@ -880,6 +894,106 @@ def _extract_methods(code: str) -> dict[str, list[JavaMethod]]:
 
 def _inside_method(methods: dict[str, list[JavaMethod]], name: str, offset: int) -> bool:
     return any(m.body_start <= offset < m.body_end for m in methods.get(name, []))
+
+
+def _enclosing_visibility_conditions(
+    code: str,
+    methods: dict[str, list[JavaMethod]],
+    offset: int,
+    evaluator: JavaIntEvaluator,
+    warnings: list[ExtractionWarning],
+    warned_offsets: set[int],
+) -> list[dict[str, Any]]:
+    """Return simple if/else conditions enclosing *offset* in the same method.
+
+    This is intentionally structural rather than a full Java CFG. It handles
+    the common braced or single-statement ``if / else if / else`` forms and
+    leaves unsupported expressions unresolved instead of guessing.
+    """
+
+    method: JavaMethod | None = None
+    for overloads in methods.values():
+        for candidate in overloads:
+            if candidate.body_start <= offset < candidate.body_end:
+                method = candidate
+                break
+        if method is not None:
+            break
+    if method is None:
+        return []
+
+    clauses: list[dict[str, Any]] = []
+    segment = code[method.body_start:offset]
+    for match in re.finditer(r"\bif\s*\(", segment):
+        if_start = method.body_start + match.start()
+        open_paren = code.find("(", if_start)
+        try:
+            close_paren = _matching(code, open_paren)
+            then_start = _skip_ws(code, close_paren + 1)
+            then_end = _statement_end(code, then_start)
+        except (ValueError, RecursionError):
+            continue
+
+        expected: bool | None = None
+        if then_start <= offset < then_end:
+            expected = True
+        else:
+            after_then = _skip_ws(code, then_end)
+            else_match = re.match(r"else\b", code[after_then:])
+            if else_match:
+                else_start = _skip_ws(code, after_then + else_match.end())
+                try:
+                    else_end = _statement_end(code, else_start)
+                except (ValueError, RecursionError):
+                    else_end = else_start
+                if else_start <= offset < else_end:
+                    expected = False
+
+        if expected is None:
+            continue
+
+        raw_expr = code[open_paren + 1:close_paren].strip()
+        normalized = normalize_java_condition(raw_expr)
+        if normalized is not None:
+            normalized = bind_numeric_constants(normalized, evaluator.env)
+        if normalized is None:
+            if if_start not in warned_offsets:
+                warnings.append(
+                    ExtractionWarning(
+                        "UNRESOLVED_IF_CONDITION",
+                        f"unsupported visibility condition: {raw_expr[:120]}",
+                        _line_of(code, if_start),
+                    )
+                )
+                warned_offsets.add(if_start)
+            continue
+        clauses.append(
+            {
+                "expr": normalized,
+                "when": expected,
+                "java": raw_expr,
+                "source_line": _line_of(code, if_start),
+            }
+        )
+
+    clauses.sort(key=lambda item: int(item.get("source_line", 0)))
+    return clauses
+
+
+def _attach_visibility_conditions(
+    element: dict[str, Any],
+    code: str,
+    methods: dict[str, list[JavaMethod]],
+    offset: int,
+    evaluator: JavaIntEvaluator,
+    warnings: list[ExtractionWarning],
+    warned_offsets: set[int],
+) -> None:
+    clauses = _enclosing_visibility_conditions(
+        code, methods, offset, evaluator, warnings, warned_offsets
+    )
+    if clauses:
+        element["visibility_conditions"] = clauses
 
 
 @dataclass(frozen=True)
@@ -1591,6 +1705,7 @@ def _progress_from_fill(
 
 def _default_state_and_presets(elements: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     keys: set[str] = set()
+    condition_keys: set[str] = set()
     for e in elements:
         text = str(e.get("text", ""))
         keys.update(re.findall(r"\{([A-Za-z_]\w*)\}", text))
@@ -1598,6 +1713,11 @@ def _default_state_and_presets(elements: list[dict[str, Any]]) -> tuple[dict[str
             value = e.get(name)
             if isinstance(value, str) and value.startswith("state."):
                 keys.add(value[6:])
+        for clause in e.get("visibility_conditions", []) or []:
+            if isinstance(clause, dict) and isinstance(clause.get("expr"), str):
+                names = condition_names(clause["expr"])
+                condition_keys.update(names)
+                keys.update(names)
 
     state: dict[str, Any] = {}
     for key in sorted(keys):
@@ -1607,6 +1727,8 @@ def _default_state_and_presets(elements: list[dict[str, Any]]) -> tuple[dict[str
             state[key] = "Inventory"
         elif "duration" in key:
             state[key] = 1000
+        elif key in condition_keys and key.startswith(("is_", "has_", "can_", "should_")):
+            state[key] = False
         else:
             state[key] = 0
 
@@ -1687,6 +1809,7 @@ def extract_java(
     methods = _extract_methods(screen_code)
     elements: list[dict[str, Any]] = []
     counters: dict[str, int] = {}
+    warned_condition_offsets: set[int] = set()
 
     def next_id(kind: str) -> str:
         counters[kind] = counters.get(kind, 0) + 1
@@ -1720,6 +1843,9 @@ def extract_java(
             if progress is not None:
                 progress["id"] = next_id("progress")
                 _attach_pose_transform(progress, screen_code, methods, start, evaluator)
+                _attach_visibility_conditions(
+                    progress, screen_code, methods, start, evaluator, warnings, warned_condition_offsets
+                )
                 elements.append(progress)
                 continue
             warnings.append(
@@ -1742,6 +1868,9 @@ def extract_java(
             "source_line": _line_of(screen_code, start),
         }
         _attach_pose_transform(fill, screen_code, methods, start, evaluator)
+        _attach_visibility_conditions(
+            fill, screen_code, methods, start, evaluator, warnings, warned_condition_offsets
+        )
         elements.append(fill)
 
     # blit destination bounds only.
@@ -1760,6 +1889,9 @@ def extract_java(
             continue
         blit = {"type":"blit","id":next_id("blit"),"x":x,"y":y,"w":w,"h":h,"texture":args[0].strip(),"source_line":_line_of(screen_code,start)}
         _attach_pose_transform(blit, screen_code, methods, start, evaluator)
+        _attach_visibility_conditions(
+            blit, screen_code, methods, start, evaluator, warnings, warned_condition_offsets
+        )
         elements.append(blit)
 
     # drawString / drawCenteredString.
@@ -1793,6 +1925,9 @@ def extract_java(
         if name == "drawCenteredString":
             element["align"] = "center"
         _attach_pose_transform(element, screen_code, methods, start, evaluator)
+        _attach_visibility_conditions(
+            element, screen_code, methods, start, evaluator, warnings, warned_condition_offsets
+        )
         elements.append(element)
 
     # Button.builder(...).bounds(...) including small helper chains from init().
