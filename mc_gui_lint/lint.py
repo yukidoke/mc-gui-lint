@@ -60,8 +60,17 @@ def _transform_rect(element: Element, rect: Rect) -> Rect:
     return Rect(x, y, w, h)
 
 
-def expected_text_region(element: Element) -> Rect | None:
-    region = element.data.get("expected_region")
+def layout_constraint(element: Element) -> dict[str, Any]:
+    value = element.data.get("layout_constraint")
+    return value if isinstance(value, dict) else {}
+
+
+def expected_constraint_region(element: Element) -> Rect | None:
+    constraint = layout_constraint(element)
+    region = constraint.get("inside")
+    if not isinstance(region, dict):
+        # Compatibility with v0.1.5 callers/config parsing.
+        region = element.data.get("expected_region")
     if not isinstance(region, dict):
         return None
     scale = _screen_scale(element)
@@ -71,6 +80,22 @@ def expected_text_region(element: Element) -> Rect | None:
         float(region.get("w", 0.0)) * scale,
         float(region.get("h", 0.0)) * scale,
     )
+
+
+def expected_text_region(element: Element) -> Rect | None:
+    """Backward-compatible alias for the v0.1.5 text-only helper."""
+    return expected_constraint_region(element)
+
+
+def _alignment_error(rect: Rect, region: Rect, align: str) -> float | None:
+    align = align.lower()
+    if align == "left":
+        return rect.x - region.x
+    if align == "center":
+        return (rect.x + rect.w / 2.0) - (region.x + region.w / 2.0)
+    if align == "right":
+        return rect.right - region.right
+    return None
 
 
 def resolve_elements(
@@ -154,23 +179,92 @@ def lint_layout(
                 )
             )
 
-    # Explicit text containment constraints from overlay/config.
+    # Explicit containment/alignment constraints from overlay/config.
     for r in resolved:
-        if r.kind != "text":
-            continue
-        expected = expected_text_region(r.element)
+        constraint = layout_constraint(r.element)
+        expected = expected_constraint_region(r.element)
         if expected is None:
             continue
         if not expected.contains(r.rect):
+            legacy_text = bool(constraint.get("legacy_text_region")) and r.kind == "text"
+            code = "TEXT_REGION_OVERFLOW" if legacy_text else "ELEMENT_OUT_OF_REGION"
+            label = f"text {r.text!r}" if r.kind == "text" else r.kind
             issues.append(
                 LintIssue(
                     "ERROR",
-                    "TEXT_REGION_OVERFLOW",
-                    f"text {r.text!r} bounds={r.rect} does not fit expected region={expected}"
+                    code,
+                    f"{label} bounds={r.rect} does not fit expected region={expected}"
                     + _source_suffix(r.element),
                     (r.element.id,),
                 )
             )
+
+        align = constraint.get("align")
+        if align is not None:
+            delta = _alignment_error(r.rect, expected, str(align))
+            if delta is None:
+                issues.append(
+                    LintIssue(
+                        "ERROR",
+                        "UNKNOWN_ALIGNMENT",
+                        f"unsupported alignment {align!r}; expected left, center, or right"
+                        + _source_suffix(r.element),
+                        (r.element.id,),
+                    )
+                )
+            elif abs(delta) > 1e-9:
+                issues.append(
+                    LintIssue(
+                        "ERROR",
+                        "ELEMENT_ALIGNMENT_MISMATCH",
+                        f"{r.kind} bounds={r.rect} is not {str(align).lower()} aligned "
+                        f"within region={expected} (delta={delta:g}px)"
+                        + _source_suffix(r.element),
+                        (r.element.id,),
+                    )
+                )
+
+    # Relative layout constraints. A gap is a minimum spacing in GUI-local
+    # pixels. Negative actual gaps naturally report overlaps as GAP_TOO_SMALL.
+    for r in resolved:
+        constraint = layout_constraint(r.element)
+        if not constraint:
+            continue
+        required_gap = float(constraint.get("gap", 0.0)) * _screen_scale(r.element)
+        relations = (
+            ("right_of", lambda a, b: a.rect.x - b.rect.right, "horizontal"),
+            ("left_of", lambda a, b: b.rect.x - a.rect.right, "horizontal"),
+            ("below", lambda a, b: a.rect.y - b.rect.bottom, "vertical"),
+            ("above", lambda a, b: b.rect.y - a.rect.bottom, "vertical"),
+        )
+        for key, measure, axis in relations:
+            target_id = constraint.get(key)
+            if target_id is None:
+                continue
+            target = by_id.get(str(target_id))
+            if target is None:
+                issues.append(
+                    LintIssue(
+                        "ERROR",
+                        "CONSTRAINT_TARGET_NOT_FOUND",
+                        f"{key} references unknown element {target_id!r}"
+                        + _source_suffix(r.element),
+                        (r.element.id, str(target_id)),
+                    )
+                )
+                continue
+            actual_gap = float(measure(r, target))
+            if actual_gap + 1e-9 < required_gap:
+                issues.append(
+                    LintIssue(
+                        "ERROR",
+                        "GAP_TOO_SMALL",
+                        f"{r.element.id} must be {key} {target.element.id} with gap>={required_gap:g}px; "
+                        f"actual {axis} gap={actual_gap:g}px"
+                        + _source_suffix(r.element, target.element),
+                        (r.element.id, target.element.id),
+                    )
+                )
 
     # Menu slot領域外・slot同士
     for slot in menu_slots:

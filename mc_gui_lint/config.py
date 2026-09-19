@@ -68,6 +68,23 @@ def _number(value: Any, default: float = 0.0) -> float:
     return float(value)
 
 
+def _rect_spec(value: Any, *, path: str) -> dict[str, float]:
+    """Normalize a rectangle constraint from mapping or [x, y, w, h]."""
+    if isinstance(value, (list, tuple)):
+        if len(value) != 4:
+            raise ValueError(f"{path} must contain exactly [x, y, w, h]")
+        x, y, w, h = value
+        return {"x": _number(x), "y": _number(y), "w": _number(w), "h": _number(h)}
+    if isinstance(value, dict):
+        return {
+            "x": _number(value.get("x", 0)),
+            "y": _number(value.get("y", 0)),
+            "w": _number(value.get("w", 0)),
+            "h": _number(value.get("h", 0)),
+        }
+    raise TypeError(f"{path} must be a mapping or [x, y, w, h]")
+
+
 def parse_elements(doc: dict[str, Any]) -> list[Element]:
     """Parse GUI elements and attach optional overlay-only layout hints.
 
@@ -79,20 +96,24 @@ def parse_elements(doc: dict[str, Any]) -> list[Element]:
         element_overrides:
           text_1:
             scale: 0.8
-        text_regions:
+        constraints:
           text_1:
-            x: 80
-            y: 18
-            w: 88
-            h: 10
+            inside: [80, 18, 88, 10]
             align: center
+          start_button:
+            below: progress
+            gap: 4
 
-    ``text_regions`` coordinates are GUI-local coordinates before
-    ``screen_scale`` is applied.
+    Legacy ``text_regions`` remains supported and is normalized into the same
+    constraint representation. Constraint coordinates are GUI-local coordinates
+    before ``screen_scale`` is applied.
     """
     elements: list[Element] = []
     overrides = doc.get("element_overrides", {}) or {}
     text_regions = doc.get("text_regions", {}) or {}
+    constraints = doc.get("constraints", {}) or {}
+    if not isinstance(constraints, dict):
+        raise TypeError("constraints must be a mapping")
     screen_scale = float(doc.get("screen_scale", 1.0) or 1.0)
 
     for raw in doc.get("elements", []):
@@ -106,18 +127,44 @@ def parse_elements(doc: dict[str, Any]) -> list[Element]:
         if "align" in override:
             data["align"] = str(override["align"])
 
+        # v0.1.5 compatibility: text_regions is the text-only predecessor of
+        # generic layout constraints. Explicit constraints take precedence.
+        normalized_constraint: dict[str, Any] = {}
         region = text_regions.get(element_id)
         if region is not None:
             if not isinstance(region, dict):
                 raise TypeError(f"text_regions.{element_id} must be a mapping")
-            data["expected_region"] = {
-                "x": _number(region.get("x", 0)),
-                "y": _number(region.get("y", 0)),
-                "w": _number(region.get("w", 0)),
-                "h": _number(region.get("h", 0)),
-            }
+            normalized_constraint["inside"] = _rect_spec(
+                region, path=f"text_regions.{element_id}"
+            )
+            normalized_constraint["legacy_text_region"] = True
             if "align" in region:
-                data["align"] = str(region["align"])
+                normalized_constraint["align"] = str(region["align"])
+
+        constraint = constraints.get(element_id)
+        if constraint is not None:
+            if not isinstance(constraint, dict):
+                raise TypeError(f"constraints.{element_id} must be a mapping")
+            if "inside" in constraint:
+                normalized_constraint["inside"] = _rect_spec(
+                    constraint["inside"], path=f"constraints.{element_id}.inside"
+                )
+                normalized_constraint["legacy_text_region"] = False
+            for key in ("align", "right_of", "below", "left_of", "above"):
+                if key in constraint:
+                    normalized_constraint[key] = str(constraint[key])
+            if "gap" in constraint:
+                normalized_constraint["gap"] = _number(constraint["gap"])
+
+        if normalized_constraint:
+            data["layout_constraint"] = normalized_constraint
+            # For text, alignment also describes how x is interpreted as a text
+            # anchor (matching drawCenteredString-style layouts).
+            if raw.get("type") == "text" and "align" in normalized_constraint:
+                data["align"] = normalized_constraint["align"]
+            # Keep the old internal key for callers that inspect it directly.
+            if normalized_constraint.get("legacy_text_region") and "inside" in normalized_constraint:
+                data["expected_region"] = normalized_constraint["inside"]
 
         if screen_scale != 1.0:
             data["screen_scale"] = screen_scale

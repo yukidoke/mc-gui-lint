@@ -186,7 +186,12 @@ Inset:        1px
 | `TEXT_BUTTON_OVERLAP` | 文字列とボタンが重なっている |
 | `TEXT_PROGRESS_OVERLAP` | 文字列と進捗バーが重なっている |
 | `TEXT_RIGHT_CLIPPED` | 文字列がGUI右端を超えている |
-| `TEXT_REGION_OVERFLOW` | `text_regions` で指定した期待矩形に文字が収まらない |
+| `TEXT_REGION_OVERFLOW` | 旧 `text_regions` で指定した期待矩形に文字が収まらない |
+| `ELEMENT_OUT_OF_REGION` | 要素が `constraints.<id>.inside` の矩形に収まらない |
+| `ELEMENT_ALIGNMENT_MISMATCH` | 要素が期待矩形内で指定した left / center / right に揃っていない |
+| `GAP_TOO_SMALL` | `right_of` / `left_of` / `below` / `above` の最小間隔を満たしていない |
+| `CONSTRAINT_TARGET_NOT_FOUND` | 相対制約が存在しない要素IDを参照している |
+| `UNKNOWN_ALIGNMENT` | `left` / `center` / `right` 以外の揃え方が指定されている |
 | `OUT_OF_GUI_BOUNDS` | GUI要素が領域外へはみ出している |
 | `CLICK_RENDER_MISMATCH` | click領域と描画位置が一致しない |
 | `BUTTON_TEXT_OVERFLOW` | ボタン文字列が利用可能幅を超えている |
@@ -201,7 +206,7 @@ Inset:        1px
 - **黄**: Lint対象になった要素
 - **青**: Menu slot / click領域
 - **紫**: 状態依存領域
-- **シアン**: `text_regions` で指定した期待矩形
+- **シアン**: `constraints.<id>.inside` または旧 `text_regions` で指定した期待矩形
 
 ## 対応しているJavaパターン
 
@@ -426,21 +431,45 @@ runtime dump
 
 後から与えた情報ほど優先されます。
 
-### 文字の期待矩形・倍率の補助設定
+### 汎用レイアウト制約・倍率の補助設定
 
-Java解析で取り切れないレイアウト情報は、抽出済み要素IDをキーにして追加できます。`elements` 配列そのものを置き換える必要はありません。
+Java解析で取り切れないレイアウト情報は、抽出済み要素IDをキーに追加できます。`elements` 配列そのものを置き換える必要はありません。
 
 ```yaml
 # Screen側の描画要素全体に掛ける補助倍率。Menu slot座標は変えません。
 screen_scale: 0.9
 
-# 個別要素に未解析のPoseStack.scale(...)相当を補う倍率。GUI原点基準で座標と描画サイズを倍率変更します。
+# 個別要素に未解析のPoseStack.scale(...)相当を補う倍率。
 element_overrides:
-  text_1:
+  power_text:
     scale: 0.8
 
-# この文字はこの矩形内に収まるべき、という制約。
-# 座標はscreen_scale適用前のGUIローカル座標です。
+constraints:
+  # この要素はこの矩形に収まり、横方向の中央にあるべき。
+  title:
+    inside: [8, 6, 160, 12]
+    align: center
+
+  # power_icon の右側に最低4px空ける。
+  power_text:
+    right_of: power_icon
+    gap: 4
+
+  # progress の下に最低6px空ける。
+  start_button:
+    below: progress
+    gap: 6
+```
+
+`inside` は `[x, y, w, h]` と `x/y/w/h` のmappingの両方を受け付けます。座標と `gap` は `screen_scale` 適用前のGUIローカル値です。期待矩形から要素がはみ出すと `ELEMENT_OUT_OF_REGION`、debug PNGでは期待矩形をシアンで表示します。
+
+`inside` と一緒に `align: left | center | right` を指定すると、期待矩形内での横方向揃えも検査します。テキストの場合は `x` のアンカー解釈にも使われるため、`align: center` は `drawCenteredString(...)` と同じ扱いになります。
+
+相対制約はPoseStackやoverlay倍率を適用した後の実バウンドに対して評価します。`right_of` / `left_of` / `below` / `above` には参照先の要素IDを指定し、`gap` は最低限必要な間隔です。間隔不足は `GAP_TOO_SMALL`、存在しないIDは `CONSTRAINT_TARGET_NOT_FOUND` になります。重なっている場合は実gapが負になるため、宣言した関係については重なりも検出できます。
+
+v0.1.5の `text_regions` も互換性のため残しており、従来どおり `TEXT_REGION_OVERFLOW` を報告します。
+
+```yaml
 text_regions:
   text_1:
     x: 80
@@ -449,8 +478,6 @@ text_regions:
     h: 10
     align: center
 ```
-
-`align: center` を指定すると、対象テキストの `x` を中央アンカーとして扱います。Java側が `drawCenteredString(...)` の場合は自動で中央揃えになります。文字の実描画矩形が期待矩形を超えると `TEXT_REGION_OVERFLOW` を `ERROR` として報告します。debug PNGでは期待矩形をシアンで表示します。
 
 `screen_scale` / `element_overrides.*.scale` は、`scaled(graphics, .8F, () -> ...)` のように静的解析しづらい補助メソッド越しの変換を手動補完するための近似です。`element_overrides.*.scale` はGUI原点を基準に座標と描画サイズの両方へ適用されます。直接解析できたPoseStack変換はIRの `pose_transform` として保持されます。
 

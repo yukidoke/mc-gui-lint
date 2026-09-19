@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .lint import expected_text_region, resolve_elements
+from .lint import expected_constraint_region, resolve_elements
 from .model import Element, LintIssue, MenuSlot, Rect, Screen, Viewport
 from .resolve import render_text, state_value
 from .text_metrics import ApproxMinecraftFontMetrics
@@ -189,11 +189,9 @@ def render(
             color = (45, 210, 80, 255) if expected == slot.local_rect() else (255, 60, 60, 255)
             _draw_rect(draw, frame, outline=color, width=2)
 
-        # Explicit expected text regions from overlay/config.
+        # Explicit expected regions from overlay/config.
         for r in resolved:
-            if r.kind != "text":
-                continue
-            region = expected_text_region(r.element)
+            region = expected_constraint_region(r.element)
             if region is not None:
                 _draw_rect(
                     draw,

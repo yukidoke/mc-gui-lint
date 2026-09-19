@@ -178,7 +178,12 @@ Inset:        1px
 | `TEXT_BUTTON_OVERLAP` | Text overlaps a button |
 | `TEXT_PROGRESS_OVERLAP` | Text overlaps a progress bar |
 | `TEXT_RIGHT_CLIPPED` | Text extends beyond the right edge |
-| `TEXT_REGION_OVERFLOW` | Text does not fit the rectangle declared in `text_regions` |
+| `TEXT_REGION_OVERFLOW` | Legacy `text_regions` text does not fit its declared rectangle |
+| `ELEMENT_OUT_OF_REGION` | An element does not fit its `constraints.<id>.inside` rectangle |
+| `ELEMENT_ALIGNMENT_MISMATCH` | An element is not left/center/right aligned within its declared region |
+| `GAP_TOO_SMALL` | A relative `right_of` / `left_of` / `below` / `above` spacing constraint is violated |
+| `CONSTRAINT_TARGET_NOT_FOUND` | A relative constraint references an unknown element ID |
+| `UNKNOWN_ALIGNMENT` | A constraint uses an alignment other than `left`, `center`, or `right` |
 | `OUT_OF_GUI_BOUNDS` | An element extends outside the GUI |
 | `CLICK_RENDER_MISMATCH` | Click bounds differ from rendered bounds |
 | `BUTTON_TEXT_OVERFLOW` | Button text exceeds its usable width |
@@ -193,7 +198,7 @@ Inset:        1px
 - **Yellow**: element involved in a lint issue
 - **Blue**: Menu slot or click bounds
 - **Purple**: state-dependent region
-- **Cyan**: expected rectangle declared in `text_regions`
+- **Cyan**: expected rectangle declared by `constraints.<id>.inside` or legacy `text_regions`
 
 ## Supported Java patterns
 
@@ -376,7 +381,7 @@ runtime dump
 
 Later sources take precedence.
 
-### Text regions and scale hints
+### Layout constraints and scale hints
 
 Overlay-only hints are keyed by extracted element ID, so you do not need to replace the whole `elements` list:
 
@@ -384,9 +389,32 @@ Overlay-only hints are keyed by extracted element ID, so you do not need to repl
 screen_scale: 0.9
 
 element_overrides:
-  text_1:
+  power_text:
     scale: 0.8
 
+constraints:
+  title:
+    inside: [8, 6, 160, 12]
+    align: center
+
+  power_text:
+    right_of: power_icon
+    gap: 4
+
+  start_button:
+    below: progress
+    gap: 6
+```
+
+`inside` accepts either `[x, y, w, h]` or a mapping with `x`, `y`, `w`, and `h`. Coordinates and `gap` values are GUI-local values before `screen_scale` is applied. An element outside its declared region emits `ELEMENT_OUT_OF_REGION`. The debug PNG draws declared regions in cyan.
+
+`align` with an `inside` region checks horizontal `left`, `center`, or `right` alignment. For text elements it also defines how the element's `x` coordinate is interpreted as a text anchor, so `align: center` matches `drawCenteredString(...)`.
+
+Relative constraints use resolved element bounds after PoseStack/overlay transforms. `right_of`, `left_of`, `below`, and `above` accept another element ID, while `gap` defines the minimum required spacing. A violated spacing emits `GAP_TOO_SMALL`; an unknown target emits `CONSTRAINT_TARGET_NOT_FOUND`. Negative actual gaps therefore catch overlap for relationships that you explicitly declare without enabling a noisy all-elements overlap check.
+
+The v0.1.5 `text_regions` syntax remains supported for compatibility and still reports `TEXT_REGION_OVERFLOW`:
+
+```yaml
 text_regions:
   text_1:
     x: 80
@@ -395,8 +423,6 @@ text_regions:
     h: 10
     align: center
 ```
-
-`text_regions` coordinates are GUI-local coordinates before `screen_scale`. `align: center` treats the text element's `x` value as a center anchor; `drawCenteredString(...)` sets this automatically. If the rendered text bounds exceed the declared rectangle, lint emits `TEXT_REGION_OVERFLOW` as an error. The debug PNG draws expected text regions in cyan.
 
 `screen_scale` scales Screen-side rendered elements but intentionally leaves Menu slot coordinates unchanged, so render/click mismatches remain visible. `element_overrides.<id>.scale` acts like an otherwise-unseen `PoseStack.scale(...)`: it scales that element's coordinates and rendered extent about the GUI origin. These hints are intended for transforms hidden behind helpers such as `scaled(graphics, .8F, () -> ...)`.
 

@@ -72,6 +72,96 @@ class LayoutHintsTest(unittest.TestCase):
         issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
         self.assertFalse(any(i.code == "TEXT_REGION_OVERFLOW" for i in issues), issues)
 
+    def test_generic_inside_constraint_accepts_list_form(self):
+        doc = {
+            "elements": [
+                {"type": "fill", "id": "panel", "x": 10, "y": 8, "w": 20, "h": 10}
+            ],
+            "constraints": {"panel": {"inside": [8, 6, 30, 20]}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        self.assertFalse(any(i.code == "ELEMENT_OUT_OF_REGION" for i in issues), issues)
+
+    def test_generic_inside_constraint_reports_overflow(self):
+        doc = {
+            "elements": [
+                {"type": "button", "id": "start", "x": 20, "y": 10, "w": 30, "h": 20, "text": "Start"}
+            ],
+            "constraints": {
+                "start": {"inside": {"x": 20, "y": 10, "w": 25, "h": 20}}
+            },
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        self.assertTrue(any(i.code == "ELEMENT_OUT_OF_REGION" for i in issues), issues)
+
+    def test_center_alignment_constraint_applies_to_non_text_elements(self):
+        good = {
+            "elements": [
+                {"type": "fill", "id": "box", "x": 40, "y": 5, "w": 20, "h": 10}
+            ],
+            "constraints": {"box": {"inside": [20, 0, 60, 20], "align": "center"}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(good), [], {}, {})
+        self.assertFalse(any(i.code == "ELEMENT_ALIGNMENT_MISMATCH" for i in issues), issues)
+
+        bad = {
+            "elements": [
+                {"type": "fill", "id": "box", "x": 35, "y": 5, "w": 20, "h": 10}
+            ],
+            "constraints": {"box": {"inside": [20, 0, 60, 20], "align": "center"}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(bad), [], {}, {})
+        self.assertTrue(any(i.code == "ELEMENT_ALIGNMENT_MISMATCH" for i in issues), issues)
+
+    def test_right_of_constraint_enforces_minimum_gap(self):
+        doc = {
+            "elements": [
+                {"type": "fill", "id": "icon", "x": 10, "y": 10, "w": 8, "h": 8},
+                {"type": "text", "id": "label", "x": 20, "y": 10, "text": "A"},
+            ],
+            "constraints": {"label": {"right_of": "icon", "gap": 4}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        gap_issues = [i for i in issues if i.code == "GAP_TOO_SMALL"]
+        self.assertEqual(len(gap_issues), 1, issues)
+        self.assertEqual(gap_issues[0].element_ids, ("label", "icon"))
+
+    def test_below_constraint_passes_with_exact_gap(self):
+        doc = {
+            "elements": [
+                {"type": "progress", "id": "progress", "x": 8, "y": 10, "w": 30, "h": 4},
+                {"type": "button", "id": "button", "x": 8, "y": 18, "w": 30, "h": 10, "text": "Go"},
+            ],
+            "constraints": {"button": {"below": "progress", "gap": 4}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        self.assertFalse(any(i.code == "GAP_TOO_SMALL" for i in issues), issues)
+
+    def test_relative_constraint_missing_target_is_error(self):
+        doc = {
+            "elements": [
+                {"type": "fill", "id": "box", "x": 10, "y": 10, "w": 10, "h": 10}
+            ],
+            "constraints": {"box": {"right_of": "missing", "gap": 2}},
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        self.assertTrue(any(i.code == "CONSTRAINT_TARGET_NOT_FOUND" for i in issues), issues)
+
+    def test_constraint_gap_and_region_follow_screen_scale(self):
+        doc = {
+            "screen_scale": 0.5,
+            "elements": [
+                {"type": "fill", "id": "a", "x": 10, "y": 10, "w": 10, "h": 10},
+                {"type": "fill", "id": "b", "x": 24, "y": 10, "w": 10, "h": 10},
+            ],
+            "constraints": {
+                "a": {"inside": [10, 10, 10, 10]},
+                "b": {"right_of": "a", "gap": 4},
+            },
+        }
+        issues = lint_layout(Screen(100, 50), parse_elements(doc), [], {}, {})
+        self.assertFalse(any(i.code in {"ELEMENT_OUT_OF_REGION", "GAP_TOO_SMALL"} for i in issues), issues)
+
 
 if __name__ == "__main__":
     unittest.main()
