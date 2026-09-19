@@ -14,12 +14,13 @@ class CrossClassConstantTest(unittest.TestCase):
         evaluator = JavaIntEvaluator({"FleetCommandMenu.BUTTON_ALPHA": 3})
         self.assertEqual(evaluator.eval("FleetCommandMenu.BUTTON_ALPHA"), 3)
 
-    def test_public_static_final_integral_constants_only(self):
+    def test_public_static_final_numeric_constants_only(self):
         code = """
         public final class FleetCommandMenu {
             public static final int BUTTON_ALPHA = 0;
             public static final int BUTTON_BETA = BUTTON_ALPHA + 1;
             public static final long BUTTON_GAMMA = 2L;
+            public static final float LABEL_SCALE = 0.8F;
             static final int PACKAGE_PRIVATE = 9;
             public static int MUTABLE = 10;
             public static final Integer BOXED = 11;
@@ -33,6 +34,7 @@ class CrossClassConstantTest(unittest.TestCase):
         self.assertEqual(constants["FleetCommandMenu.BUTTON_ALPHA"], 0)
         self.assertEqual(constants["FleetCommandMenu.BUTTON_BETA"], 1)
         self.assertEqual(constants["FleetCommandMenu.BUTTON_GAMMA"], 2)
+        self.assertAlmostEqual(constants["FleetCommandMenu.LABEL_SCALE"], 0.8)
         self.assertNotIn("FleetCommandMenu.PACKAGE_PRIVATE", constants)
         self.assertNotIn("FleetCommandMenu.MUTABLE", constants)
         self.assertNotIn("FleetCommandMenu.BOXED", constants)

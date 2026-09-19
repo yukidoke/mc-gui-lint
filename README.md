@@ -178,6 +178,7 @@ Inset:        1px
 | `TEXT_BUTTON_OVERLAP` | Text overlaps a button |
 | `TEXT_PROGRESS_OVERLAP` | Text overlaps a progress bar |
 | `TEXT_RIGHT_CLIPPED` | Text extends beyond the right edge |
+| `TEXT_REGION_OVERFLOW` | Text does not fit the rectangle declared in `text_regions` |
 | `OUT_OF_GUI_BOUNDS` | An element extends outside the GUI |
 | `CLICK_RENDER_MISMATCH` | Click bounds differ from rendered bounds |
 | `BUTTON_TEXT_OVERFLOW` | Button text exceeds its usable width |
@@ -192,6 +193,7 @@ Inset:        1px
 - **Yellow**: element involved in a lint issue
 - **Blue**: Menu slot or click bounds
 - **Purple**: state-dependent region
+- **Cyan**: expected rectangle declared in `text_regions`
 
 ## Supported Java patterns
 
@@ -332,6 +334,24 @@ Run it with:
 mc-gui-lint preview.yaml --output gui-preview
 ```
 
+
+### Numeric constants and simple PoseStack transforms
+
+Coordinate expressions support primitive `static final` integer/float constants, simple arithmetic, and `Math.round(...)`. The extractor also follows linear `pushPose / translate / scale / popPose` sequences inside the same method.
+
+```java
+private static final float LABEL_SCALE = 0.8F;
+private static final int LABEL_X = Math.round(120 * LABEL_SCALE);
+
+graphics.pose().pushPose();
+graphics.pose().translate(10, 4, 0);
+graphics.pose().scale(LABEL_SCALE, LABEL_SCALE, 1.0F);
+graphics.drawCenteredString(font, title, LABEL_X, 18, 0xFFFFFF);
+graphics.pose().popPose();
+```
+
+Transforms hidden behind helpers/lambdas or complex control flow are intentionally left to overlay hints.
+
 ## Overlay files
 
 Use `--overlay` when Java extraction gets most of the layout right but a small amount of information needs to be supplied manually:
@@ -355,6 +375,30 @@ runtime dump
 ```
 
 Later sources take precedence.
+
+### Text regions and scale hints
+
+Overlay-only hints are keyed by extracted element ID, so you do not need to replace the whole `elements` list:
+
+```yaml
+screen_scale: 0.9
+
+element_overrides:
+  text_1:
+    scale: 0.8
+
+text_regions:
+  text_1:
+    x: 80
+    y: 18
+    w: 88
+    h: 10
+    align: center
+```
+
+`text_regions` coordinates are GUI-local coordinates before `screen_scale`. `align: center` treats the text element's `x` value as a center anchor; `drawCenteredString(...)` sets this automatically. If the rendered text bounds exceed the declared rectangle, lint emits `TEXT_REGION_OVERFLOW` as an error. The debug PNG draws expected text regions in cyan.
+
+`screen_scale` scales Screen-side rendered elements but intentionally leaves Menu slot coordinates unchanged, so render/click mismatches remain visible. `element_overrides.<id>.scale` acts like an otherwise-unseen `PoseStack.scale(...)`: it scales that element's coordinates and rendered extent about the GUI origin. These hints are intended for transforms hidden behind helpers such as `scaled(graphics, .8F, () -> ...)`.
 
 ## Runtime dump
 

@@ -14,6 +14,63 @@ class ResolvedElement:
     rect: Rect
     kind: str
     text: str | None = None
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+
+
+def _pose_values(element: Element) -> tuple[float, float, float, float]:
+    pose = element.data.get("pose_transform") or {}
+    return (
+        float(pose.get("scale_x", 1.0)),
+        float(pose.get("scale_y", 1.0)),
+        float(pose.get("translate_x", 0.0)),
+        float(pose.get("translate_y", 0.0)),
+    )
+
+
+def _screen_scale(element: Element) -> float:
+    return float(element.data.get("screen_scale", 1.0) or 1.0)
+
+
+def _element_scale(element: Element) -> float:
+    return float(element.data.get("scale", 1.0) or 1.0)
+
+
+def _transform_point(element: Element, x: float, y: float) -> tuple[float, float]:
+    sx, sy, tx, ty = _pose_values(element)
+    element_scale = _element_scale(element)
+    screen_scale = _screen_scale(element)
+    # Overlay ``scale`` is a fallback for an otherwise-unseen PoseStack.scale
+    # (for example a helper/lambda wrapper), so it scales both coordinates and
+    # extents about the GUI origin just like a direct scale() call would.
+    return (
+        (x * sx + tx) * element_scale * screen_scale,
+        (y * sy + ty) * element_scale * screen_scale,
+    )
+
+
+def _transform_rect(element: Element, rect: Rect) -> Rect:
+    x1, y1 = _transform_point(element, rect.x, rect.y)
+    x2, y2 = _transform_point(element, rect.right, rect.bottom)
+    x = min(x1, x2)
+    y = min(y1, y2)
+    w = abs(x2 - x1)
+    h = abs(y2 - y1)
+
+    return Rect(x, y, w, h)
+
+
+def expected_text_region(element: Element) -> Rect | None:
+    region = element.data.get("expected_region")
+    if not isinstance(region, dict):
+        return None
+    scale = _screen_scale(element)
+    return Rect(
+        float(region.get("x", 0.0)) * scale,
+        float(region.get("y", 0.0)) * scale,
+        float(region.get("w", 0.0)) * scale,
+        float(region.get("h", 0.0)) * scale,
+    )
 
 
 def resolve_elements(
@@ -25,13 +82,38 @@ def resolve_elements(
     result: list[ResolvedElement] = []
 
     for e in elements:
+        pose_sx, pose_sy, _, _ = _pose_values(e)
+        screen_scale = _screen_scale(e)
+        element_scale = _element_scale(e)
+
         if e.type == "text":
             text = render_text(str(e.data.get("text", "")), state)
-            w = metrics.width(text)
-            h = metrics.height
-            result.append(ResolvedElement(e, Rect(e.x, e.y, w, h), "text", text))
+            scale_x = abs(pose_sx) * element_scale * screen_scale
+            scale_y = abs(pose_sy) * element_scale * screen_scale
+            w = metrics.width(text) * scale_x
+            h = metrics.height * scale_y
+            anchor_x, anchor_y = _transform_point(e, e.x, e.y)
+            align = str(e.data.get("align", "left")).lower()
+            if align == "center":
+                x = anchor_x - w / 2.0
+            elif align == "right":
+                x = anchor_x - w
+            else:
+                x = anchor_x
+            result.append(
+                ResolvedElement(e, Rect(x, anchor_y, w, h), "text", text, scale_x, scale_y)
+            )
         else:
-            result.append(ResolvedElement(e, e.local_rect(), e.type))
+            rect = _transform_rect(e, e.local_rect())
+            result.append(
+                ResolvedElement(
+                    e,
+                    rect,
+                    e.type,
+                    scale_x=abs(pose_sx) * element_scale * screen_scale,
+                    scale_y=abs(pose_sy) * element_scale * screen_scale,
+                )
+            )
 
     return result
 
@@ -68,6 +150,24 @@ def lint_layout(
                     "ERROR",
                     code,
                     f"{r.kind} bounds={r.rect} is outside image={image}" + _source_suffix(r.element),
+                    (r.element.id,),
+                )
+            )
+
+    # Explicit text containment constraints from overlay/config.
+    for r in resolved:
+        if r.kind != "text":
+            continue
+        expected = expected_text_region(r.element)
+        if expected is None:
+            continue
+        if not expected.contains(r.rect):
+            issues.append(
+                LintIssue(
+                    "ERROR",
+                    "TEXT_REGION_OVERFLOW",
+                    f"text {r.text!r} bounds={r.rect} does not fit expected region={expected}"
+                    + _source_suffix(r.element),
                     (r.element.id,),
                 )
             )

@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .lint import resolve_elements
+from .lint import expected_text_region, resolve_elements
 from .model import Element, LintIssue, MenuSlot, Rect, Screen, Viewport
 from .resolve import render_text, state_value
 from .text_metrics import ApproxMinecraftFontMetrics
@@ -37,8 +37,12 @@ def _local_to_screen(rect: Rect, left: int, top: int) -> Rect:
 
 
 def _draw_rect(draw: ImageDraw.ImageDraw, rect: Rect, *, outline, width=1, fill=None):
+    x1 = int(round(rect.x))
+    y1 = int(round(rect.y))
+    x2 = max(x1, int(round(rect.right)) - 1)
+    y2 = max(y1, int(round(rect.bottom)) - 1)
     draw.rectangle(
-        [rect.x, rect.y, rect.right - 1, rect.bottom - 1],
+        [x1, y1, x2, y2],
         outline=outline,
         width=width,
         fill=fill,
@@ -92,11 +96,15 @@ def render(
 
         elif e.type == "text":
             text = r.text or ""
-            tx = rect.x
-            if e.data.get("align") == "center":
-                tx = rect.x - max(0, r.rect.w // 2)
+            # resolve_elements() already converts centered/right-aligned anchors
+            # to the actual rendered left edge.
+            tx = int(round(rect.x))
+            ty = int(round(rect.y)) - 1
             color = tuple(e.data.get("color", [30, 30, 30, 255]))
-            draw.text((tx, rect.y - 1), text, fill=color, font=font)
+            scaled_font = font
+            if abs(r.scale_y - 1.0) > 1e-6:
+                scaled_font = _load_font(max(1, int(round(9 * r.scale_y))))
+            draw.text((tx, ty), text, fill=color, font=scaled_font)
 
         elif e.type == "slot_frame":
             _draw_rect(draw, rect, outline=(80, 80, 80, 255), fill=(150, 150, 150, 255))
@@ -180,6 +188,19 @@ def render(
             expected = Rect(r.rect.x + ix, r.rect.y + iy, r.rect.w - 2 * ix, r.rect.h - 2 * iy)
             color = (45, 210, 80, 255) if expected == slot.local_rect() else (255, 60, 60, 255)
             _draw_rect(draw, frame, outline=color, width=2)
+
+        # Explicit expected text regions from overlay/config.
+        for r in resolved:
+            if r.kind != "text":
+                continue
+            region = expected_text_region(r.element)
+            if region is not None:
+                _draw_rect(
+                    draw,
+                    _local_to_screen(region, left, top),
+                    outline=(40, 210, 210, 255),
+                    width=1,
+                )
 
         # Dynamic regions purple, collisions/errors yellow
         for r in resolved:

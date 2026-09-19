@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,34 +37,45 @@ def _snake(name: str) -> str:
 
 
 class JavaIntEvaluator:
-    """Very small evaluator for integer-ish Java coordinate expressions."""
+    """Small evaluator for numeric Java layout expressions.
 
-    def __init__(self, env: dict[str, int] | None = None):
-        self.env = dict(env or {})
+    ``eval()`` keeps the historical integer-coordinate API. ``eval_number()``
+    preserves float values so pose scales and ``static final float`` constants
+    can be followed without executing Java.
+    """
+
+    def __init__(self, env: dict[str, int | float] | None = None):
+        self.env: dict[str, int | float] = dict(env or {})
         self.env.setdefault("leftPos", 0)
         self.env.setdefault("topPos", 0)
         self.env.setdefault("imageWidth", self.env.get("imageWidth", 176))
         self.env.setdefault("imageHeight", self.env.get("imageHeight", 166))
 
-    def eval(self, expr: str) -> int:
+    @staticmethod
+    def _prepare(expr: str) -> str:
         expr = expr.strip()
         expr = re.sub(r"\bthis\.", "", expr)
-        expr = re.sub(r"\((?:int|long|short|byte)\)\s*", "", expr)
+        expr = re.sub(r"\((?:int|long|short|byte|float|double)\)\s*", "", expr)
         expr = re.sub(r"(?<=\d)[lLfFdD]\b", "", expr)
         expr = expr.replace("Math.max", "max").replace("Math.min", "min")
+        expr = expr.replace("Math.round", "jround")
+        return expr
 
-        tree = ast.parse(expr, mode="eval")
-        value = self._eval_node(tree.body)
-        return int(value)
+    def eval_number(self, expr: str) -> int | float:
+        tree = ast.parse(self._prepare(expr), mode="eval")
+        return self._eval_node(tree.body)
 
-    def _eval_node(self, node: ast.AST) -> int:
+    def eval(self, expr: str) -> int:
+        return int(self.eval_number(expr))
+
+    def _eval_node(self, node: ast.AST) -> int | float:
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return int(node.value)
+            return node.value
 
         if isinstance(node, ast.Name):
             if node.id not in self.env:
                 raise ValueError(f"unknown name {node.id}")
-            return int(self.env[node.id])
+            return self.env[node.id]
 
         if isinstance(node, ast.UnaryOp):
             value = self._eval_node(node.operand)
@@ -82,15 +94,13 @@ class JavaIntEvaluator:
                 return a - b
             if isinstance(node.op, ast.Mult):
                 return a * b
-            if isinstance(node.op, ast.Div):
+            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
                 if b == 0:
                     raise ValueError("division by zero")
-                # Java integer division truncates toward zero.
-                return int(a / b)
-            if isinstance(node.op, ast.FloorDiv):
-                if b == 0:
-                    raise ValueError("division by zero")
-                return int(a / b)
+                if isinstance(a, int) and isinstance(b, int):
+                    # Java integer division truncates toward zero.
+                    return int(a / b)
+                return a / b
             if isinstance(node.op, ast.Mod):
                 return a % b
             raise ValueError("unsupported binary operator")
@@ -105,7 +115,7 @@ class JavaIntEvaluator:
                 parts.append(current.id)
                 qualified = ".".join(reversed(parts))
                 if qualified in self.env:
-                    return int(self.env[qualified])
+                    return self.env[qualified]
             raise ValueError(
                 f"unknown qualified name {ast.unparse(node) if hasattr(ast, 'unparse') else ast.dump(node)}"
             )
@@ -116,6 +126,9 @@ class JavaIntEvaluator:
                 return max(args)
             if node.func.id == "min":
                 return min(args)
+            if node.func.id == "jround" and len(args) == 1:
+                # Java Math.round(x) == floor(x + 0.5), including negatives.
+                return int(math.floor(args[0] + 0.5))
 
         raise ValueError(f"unsupported expression: {ast.dump(node, include_attributes=False)}")
 
@@ -470,39 +483,46 @@ def _extract_class_name(code: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _extract_public_static_final_int_constants(
+def _extract_static_final_numeric_constants(
     code: str,
     class_name: str | None = None,
-    base_env: dict[str, int] | None = None,
-) -> dict[str, int]:
-    """Extract safe cross-class primitive compile-time constants.
+    base_env: dict[str, int | float] | None = None,
+    *,
+    public_only: bool = False,
+) -> dict[str, int | float]:
+    """Extract simple primitive ``static final`` numeric constants.
 
-    Only ``public static final`` integral primitives are considered. Values are
-    evaluated with ``JavaIntEvaluator`` so literals and expressions composed of
-    already-resolved constants are supported, while method calls and runtime
-    fields remain unresolved. Returned keys include both ``FIELD`` and, when a
-    class name is known, ``ClassName.FIELD``.
+    Same-class analysis accepts private/package constants; cross-class callers
+    can set ``public_only=True``. Expressions are limited to the numeric
+    evaluator (literals, names, qualified names, arithmetic, min/max and
+    ``Math.round``), so runtime method calls remain unresolved.
     """
+    visibility = r"public\s+" if public_only else r"(?:(?:public|protected|private)\s+)?"
     pattern = re.compile(
-        r"\bpublic\s+static\s+final\s+"
-        r"(?:int|long|short|byte)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);"
+        r"\b" + visibility + r"static\s+final\s+"
+        r"(int|long|short|byte|float|double)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);"
     )
-    declarations = [(m.group(1), m.group(2).strip()) for m in pattern.finditer(code)]
-    env = dict(base_env or {})
-    resolved: dict[str, int] = {}
+    declarations = [
+        (m.group(1), m.group(2), m.group(3).strip()) for m in pattern.finditer(code)
+    ]
+    env: dict[str, int | float] = dict(base_env or {})
+    resolved: dict[str, int | float] = {}
 
-    # Multiple passes allow constants to reference earlier/later constants in
-    # the same class without interpreting arbitrary Java execution.
     for _ in range(max(1, len(declarations) + 1)):
         changed = False
         evaluator = JavaIntEvaluator(env)
-        for name, expr in declarations:
+        for type_name, name, expr in declarations:
             if name in resolved:
                 continue
             try:
-                value = evaluator.eval(expr)
+                raw_value = evaluator.eval_number(expr)
             except Exception:
                 continue
+            value: int | float
+            if type_name in {"float", "double"}:
+                value = float(raw_value)
+            else:
+                value = int(raw_value)
             resolved[name] = value
             env[name] = value
             if class_name:
@@ -511,7 +531,7 @@ def _extract_public_static_final_int_constants(
         if not changed:
             break
 
-    result: dict[str, int] = {}
+    result: dict[str, int | float] = {}
     for name, value in resolved.items():
         result[name] = value
         if class_name:
@@ -519,24 +539,50 @@ def _extract_public_static_final_int_constants(
     return result
 
 
+def _extract_public_static_final_int_constants(
+    code: str,
+    class_name: str | None = None,
+    base_env: dict[str, int | float] | None = None,
+) -> dict[str, int | float]:
+    """Backward-compatible name for public primitive numeric constants."""
+    return _extract_static_final_numeric_constants(
+        code, class_name, base_env, public_only=True
+    )
+
+
 def _parse_assignments(code: str, evaluator: JavaIntEvaluator) -> None:
-    # A few passes allow later locals to depend on earlier locals.
-    patterns = [
-        re.compile(r"\b(?:final\s+)?(?:int|short|byte|long)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);"),
-        re.compile(r"\b(?:this\.)?(imageWidth|imageHeight|titleLabelX|titleLabelY|inventoryLabelX|inventoryLabelY)\s*=\s*([^;]+);"),
-    ]
+    # A few passes allow later locals to depend on earlier locals. Keep float
+    # locals as floats so pose.scale(SCALE, SCALE, 1) remains analyzable.
+    typed = re.compile(
+        r"\b(?:final\s+)?(int|short|byte|long|float|double)\s+"
+        r"([A-Za-z_]\w*)\s*=\s*([^;]+);"
+    )
+    screen_fields = re.compile(
+        r"\b(?:this\.)?(imageWidth|imageHeight|titleLabelX|titleLabelY|inventoryLabelX|inventoryLabelY)\s*=\s*([^;]+);"
+    )
     for _ in range(4):
         changed = False
-        for pattern in patterns:
-            for m in pattern.finditer(code):
-                name, expr = m.group(1), m.group(2)
-                try:
-                    value = evaluator.eval(expr)
-                except Exception:
-                    continue
-                if evaluator.env.get(name) != value:
-                    evaluator.env[name] = value
-                    changed = True
+        for m in typed.finditer(code):
+            type_name, name, expr = m.group(1), m.group(2), m.group(3)
+            try:
+                raw_value = evaluator.eval_number(expr)
+            except Exception:
+                continue
+            value: int | float = (
+                float(raw_value) if type_name in {"float", "double"} else int(raw_value)
+            )
+            if evaluator.env.get(name) != value:
+                evaluator.env[name] = value
+                changed = True
+        for m in screen_fields.finditer(code):
+            name, expr = m.group(1), m.group(2)
+            try:
+                value = evaluator.eval(expr)
+            except Exception:
+                continue
+            if evaluator.env.get(name) != value:
+                evaluator.env[name] = value
+                changed = True
         if not changed:
             break
 
@@ -819,6 +865,136 @@ def _extract_methods(code: str) -> dict[str, list[JavaMethod]]:
 
 def _inside_method(methods: dict[str, list[JavaMethod]], name: str, offset: int) -> bool:
     return any(m.body_start <= offset < m.body_end for m in methods.get(name, []))
+
+
+@dataclass(frozen=True)
+class PoseTransform:
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    translate_x: float = 0.0
+    translate_y: float = 0.0
+
+    def translated(self, x: float, y: float) -> "PoseTransform":
+        # PoseStack post-multiplies. A translate after an existing scale is
+        # therefore affected by that scale; a later scale does not move an
+        # earlier translation.
+        return PoseTransform(
+            self.scale_x,
+            self.scale_y,
+            self.translate_x + self.scale_x * x,
+            self.translate_y + self.scale_y * y,
+        )
+
+    def scaled(self, x: float, y: float) -> "PoseTransform":
+        return PoseTransform(
+            self.scale_x * x,
+            self.scale_y * y,
+            self.translate_x,
+            self.translate_y,
+        )
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "scale_x": self.scale_x,
+            "scale_y": self.scale_y,
+            "translate_x": self.translate_x,
+            "translate_y": self.translate_y,
+        }
+
+    def is_identity(self) -> bool:
+        return (
+            abs(self.scale_x - 1.0) < 1e-9
+            and abs(self.scale_y - 1.0) < 1e-9
+            and abs(self.translate_x) < 1e-9
+            and abs(self.translate_y) < 1e-9
+        )
+
+
+def _pose_transform_at(
+    code: str,
+    methods: dict[str, list[JavaMethod]],
+    offset: int,
+    evaluator: JavaIntEvaluator,
+) -> PoseTransform:
+    """Follow simple PoseStack operations earlier in the same Java method.
+
+    This intentionally ignores control-flow and helper/lambda boundaries. It is
+    a best-effort linear tracker for the common ``pushPose / translate / scale /
+    popPose`` pattern requested by the linter.
+    """
+    method: JavaMethod | None = None
+    for overloads in methods.values():
+        for candidate in overloads:
+            if candidate.body_start <= offset < candidate.body_end:
+                method = candidate
+                break
+        if method is not None:
+            break
+    if method is None:
+        return PoseTransform()
+
+    segment = code[method.body_start:offset]
+    pose_vars = set(
+        re.findall(
+            r"\b(?:PoseStack|var)\s+([A-Za-z_]\w*)\s*=\s*"
+            r"(?:guiGraphics|graphics)\s*\.\s*pose\s*\(\s*\)\s*;",
+            segment,
+        )
+    )
+
+    event_re = re.compile(
+        r"(?P<root>(?:guiGraphics|graphics)\s*\.\s*pose\s*\(\s*\)|[A-Za-z_]\w*)"
+        r"\s*\.\s*(?P<op>pushPose|popPose|scale|translate)\s*\("
+    )
+    current = PoseTransform()
+    stack: list[PoseTransform] = []
+
+    for match in event_re.finditer(segment):
+        root = match.group("root")
+        direct_pose = "." in root and "pose" in root
+        if not direct_pose and root not in pose_vars:
+            continue
+        open_pos = segment.find("(", match.start("op"))
+        try:
+            close_pos = _matching(segment, open_pos)
+        except ValueError:
+            continue
+        args = _split_args(segment[open_pos + 1:close_pos])
+        op = match.group("op")
+
+        if op == "pushPose":
+            stack.append(current)
+            continue
+        if op == "popPose":
+            if stack:
+                current = stack.pop()
+            continue
+        if len(args) < 2:
+            continue
+        try:
+            a = float(evaluator.eval_number(args[0]))
+            b = float(evaluator.eval_number(args[1]))
+        except Exception:
+            # Unknown transforms are deliberately left to overlay hints.
+            continue
+        if op == "translate":
+            current = current.translated(a, b)
+        elif op == "scale":
+            current = current.scaled(a, b)
+
+    return current
+
+
+def _attach_pose_transform(
+    element: dict[str, Any],
+    code: str,
+    methods: dict[str, list[JavaMethod]],
+    offset: int,
+    evaluator: JavaIntEvaluator,
+) -> None:
+    transform = _pose_transform_at(code, methods, offset, evaluator)
+    if not transform.is_identity():
+        element["pose_transform"] = transform.as_dict()
 
 
 def _extract_slot_frames_from_screen(
@@ -1457,19 +1633,21 @@ def extract_java(
     # arbitrary source tree.
     menu_code: str | None = None
     menu_class_name: str | None = None
-    external_constants: dict[str, int] = {}
+    external_constants: dict[str, int | float] = {}
     if menu_path is not None:
         menu_path = Path(menu_path)
         raw_menu = menu_path.read_text(encoding="utf-8")
         menu_code = _strip_comments(raw_menu)
         menu_class_name = _extract_class_name(menu_code)
         external_constants.update(
-            _extract_public_static_final_int_constants(menu_code, menu_class_name)
+            _extract_static_final_numeric_constants(
+                menu_code, menu_class_name, public_only=True
+            )
         )
 
     screen_class_name = _extract_class_name(screen_code)
-    screen_constants = _extract_public_static_final_int_constants(
-        screen_code, screen_class_name, external_constants
+    screen_constants = _extract_static_final_numeric_constants(
+        screen_code, screen_class_name, external_constants, public_only=False
     )
 
     evaluator = JavaIntEvaluator({
@@ -1526,6 +1704,7 @@ def extract_java(
             progress = _progress_from_fill(screen_code, args, evaluator, _line_of(screen_code, start))
             if progress is not None:
                 progress["id"] = next_id("progress")
+                _attach_pose_transform(progress, screen_code, methods, start, evaluator)
                 elements.append(progress)
                 continue
             warnings.append(
@@ -1537,18 +1716,18 @@ def extract_java(
             )
             continue
 
-        elements.append(
-            {
-                "type": "fill",
-                "id": next_id("fill"),
-                "x": min(x1, x2),
-                "y": min(y1, y2),
-                "w": abs(x2 - x1),
-                "h": abs(y2 - y1),
-                "color": _java_argb(args[4]),
-                "source_line": _line_of(screen_code, start),
-            }
-        )
+        fill = {
+            "type": "fill",
+            "id": next_id("fill"),
+            "x": min(x1, x2),
+            "y": min(y1, y2),
+            "w": abs(x2 - x1),
+            "h": abs(y2 - y1),
+            "color": _java_argb(args[4]),
+            "source_line": _line_of(screen_code, start),
+        }
+        _attach_pose_transform(fill, screen_code, methods, start, evaluator)
+        elements.append(fill)
 
     # blit destination bounds only.
     for _, start, _, _, arg_text in _find_calls(screen_code, ("blit",)):
@@ -1564,7 +1743,9 @@ def extract_java(
         except Exception as exc:
             warnings.append(ExtractionWarning("UNRESOLVED_BLIT", f"could not evaluate blit destination bounds: {exc}", _line_of(screen_code, start)))
             continue
-        elements.append({"type":"blit","id":next_id("blit"),"x":x,"y":y,"w":w,"h":h,"texture":args[0].strip(),"source_line":_line_of(screen_code,start)})
+        blit = {"type":"blit","id":next_id("blit"),"x":x,"y":y,"w":w,"h":h,"texture":args[0].strip(),"source_line":_line_of(screen_code,start)}
+        _attach_pose_transform(blit, screen_code, methods, start, evaluator)
+        elements.append(blit)
 
     # drawString / drawCenteredString.
     for name, start, _, _, arg_text in _find_calls(screen_code, ("drawString", "drawCenteredString")):
@@ -1596,6 +1777,7 @@ def extract_java(
             element["color"] = _java_argb(args[4])
         if name == "drawCenteredString":
             element["align"] = "center"
+        _attach_pose_transform(element, screen_code, methods, start, evaluator)
         elements.append(element)
 
     # Button.builder(...).bounds(...) including small helper chains from init().

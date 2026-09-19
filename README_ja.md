@@ -186,6 +186,7 @@ Inset:        1px
 | `TEXT_BUTTON_OVERLAP` | 文字列とボタンが重なっている |
 | `TEXT_PROGRESS_OVERLAP` | 文字列と進捗バーが重なっている |
 | `TEXT_RIGHT_CLIPPED` | 文字列がGUI右端を超えている |
+| `TEXT_REGION_OVERFLOW` | `text_regions` で指定した期待矩形に文字が収まらない |
 | `OUT_OF_GUI_BOUNDS` | GUI要素が領域外へはみ出している |
 | `CLICK_RENDER_MISMATCH` | click領域と描画位置が一致しない |
 | `BUTTON_TEXT_OVERFLOW` | ボタン文字列が利用可能幅を超えている |
@@ -200,6 +201,7 @@ Inset:        1px
 - **黄**: Lint対象になった要素
 - **青**: Menu slot / click領域
 - **紫**: 状態依存領域
+- **シアン**: `text_regions` で指定した期待矩形
 
 ## 対応しているJavaパターン
 
@@ -381,6 +383,25 @@ menu_slots:
 mc-gui-lint preview.yaml --output gui-preview
 ```
 
+
+### 数値定数と単純なPoseStack変換
+
+座標式では、`static final` の整数・浮動小数点定数、単純な四則演算、`Math.round(...)` を評価します。
+同一メソッド内に直線的に並んだ `pushPose / translate / scale / popPose` も追跡します。
+
+```java
+private static final float LABEL_SCALE = 0.8F;
+private static final int LABEL_X = Math.round(120 * LABEL_SCALE);
+
+graphics.pose().pushPose();
+graphics.pose().translate(10, 4, 0);
+graphics.pose().scale(LABEL_SCALE, LABEL_SCALE, 1.0F);
+graphics.drawCenteredString(font, title, LABEL_X, 18, 0xFFFFFF);
+graphics.pose().popPose();
+```
+
+制御フローをまたぐ変換、補助メソッドやラムダの内部に隠れた変換までは追いません。そうしたケースは下記のoverlay補助設定で補完できます。
+
 ## Overlay
 
 Java静的解析でほとんど取れているものの、一部だけ手動で補いたい場合は `--overlay` を使います。
@@ -404,6 +425,34 @@ runtime dump
 ```
 
 後から与えた情報ほど優先されます。
+
+### 文字の期待矩形・倍率の補助設定
+
+Java解析で取り切れないレイアウト情報は、抽出済み要素IDをキーにして追加できます。`elements` 配列そのものを置き換える必要はありません。
+
+```yaml
+# Screen側の描画要素全体に掛ける補助倍率。Menu slot座標は変えません。
+screen_scale: 0.9
+
+# 個別要素に未解析のPoseStack.scale(...)相当を補う倍率。GUI原点基準で座標と描画サイズを倍率変更します。
+element_overrides:
+  text_1:
+    scale: 0.8
+
+# この文字はこの矩形内に収まるべき、という制約。
+# 座標はscreen_scale適用前のGUIローカル座標です。
+text_regions:
+  text_1:
+    x: 80
+    y: 18
+    w: 88
+    h: 10
+    align: center
+```
+
+`align: center` を指定すると、対象テキストの `x` を中央アンカーとして扱います。Java側が `drawCenteredString(...)` の場合は自動で中央揃えになります。文字の実描画矩形が期待矩形を超えると `TEXT_REGION_OVERFLOW` を `ERROR` として報告します。debug PNGでは期待矩形をシアンで表示します。
+
+`screen_scale` / `element_overrides.*.scale` は、`scaled(graphics, .8F, () -> ...)` のように静的解析しづらい補助メソッド越しの変換を手動補完するための近似です。`element_overrides.*.scale` はGUI原点を基準に座標と描画サイズの両方へ適用されます。直接解析できたPoseStack変換はIRの `pose_transform` として保持されます。
 
 ## Runtime Dump
 

@@ -62,19 +62,74 @@ def parse_screen(doc: dict[str, Any]) -> Screen:
     )
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    return float(value)
+
+
 def parse_elements(doc: dict[str, Any]) -> list[Element]:
+    """Parse GUI elements and attach optional overlay-only layout hints.
+
+    Auxiliary configuration is deliberately kept outside the extracted
+    ``elements`` list so an overlay can patch one element without replacing the
+    entire Java-extracted list::
+
+        screen_scale: 0.9
+        element_overrides:
+          text_1:
+            scale: 0.8
+        text_regions:
+          text_1:
+            x: 80
+            y: 18
+            w: 88
+            h: 10
+            align: center
+
+    ``text_regions`` coordinates are GUI-local coordinates before
+    ``screen_scale`` is applied.
+    """
     elements: list[Element] = []
+    overrides = doc.get("element_overrides", {}) or {}
+    text_regions = doc.get("text_regions", {}) or {}
+    screen_scale = float(doc.get("screen_scale", 1.0) or 1.0)
+
     for raw in doc.get("elements", []):
         known = {"type", "id", "x", "y", "w", "h"}
         data = {k: v for k, v in raw.items() if k not in known}
+        element_id = str(raw["id"])
+
+        override = overrides.get(element_id, {}) or {}
+        if "scale" in override:
+            data["scale"] = float(override["scale"])
+        if "align" in override:
+            data["align"] = str(override["align"])
+
+        region = text_regions.get(element_id)
+        if region is not None:
+            if not isinstance(region, dict):
+                raise TypeError(f"text_regions.{element_id} must be a mapping")
+            data["expected_region"] = {
+                "x": _number(region.get("x", 0)),
+                "y": _number(region.get("y", 0)),
+                "w": _number(region.get("w", 0)),
+                "h": _number(region.get("h", 0)),
+            }
+            if "align" in region:
+                data["align"] = str(region["align"])
+
+        if screen_scale != 1.0:
+            data["screen_scale"] = screen_scale
+
         elements.append(
             Element(
                 type=str(raw["type"]),
-                id=str(raw["id"]),
-                x=int(raw.get("x", 0)),
-                y=int(raw.get("y", 0)),
-                w=int(raw.get("w", 0)),
-                h=int(raw.get("h", 0)),
+                id=element_id,
+                x=_number(raw.get("x", 0)),
+                y=_number(raw.get("y", 0)),
+                w=_number(raw.get("w", 0)),
+                h=_number(raw.get("h", 0)),
                 data=data,
             )
         )

@@ -6,17 +6,17 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Rect:
-    x: int
-    y: int
-    w: int
-    h: int
+    x: float
+    y: float
+    w: float
+    h: float
 
     @property
-    def right(self) -> int:
+    def right(self) -> float:
         return self.x + self.w
 
     @property
-    def bottom(self) -> int:
+    def bottom(self) -> float:
         return self.y + self.h
 
     def intersects(self, other: "Rect") -> bool:
@@ -41,11 +41,14 @@ class Rect:
         return horizontal_touch or vertical_touch
 
     def contains(self, other: "Rect") -> bool:
+        # Layout transforms can introduce harmless binary floating-point noise
+        # (for example 24 * 0.8). Do not turn that into a clipping error.
+        eps = 1e-9
         return (
-            other.x >= self.x
-            and other.y >= self.y
-            and other.right <= self.right
-            and other.bottom <= self.bottom
+            other.x >= self.x - eps
+            and other.y >= self.y - eps
+            and other.right <= self.right + eps
+            and other.bottom <= self.bottom + eps
         )
 
 
@@ -80,10 +83,10 @@ class Screen:
 class Element:
     type: str
     id: str
-    x: int
-    y: int
-    w: int = 0
-    h: int = 0
+    x: float
+    y: float
+    w: float = 0.0
+    h: float = 0.0
     data: dict[str, Any] = field(default_factory=dict)
 
     def local_rect(self) -> Rect:
