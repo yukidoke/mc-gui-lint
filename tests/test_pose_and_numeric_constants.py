@@ -16,6 +16,29 @@ class NumericConstantTest(unittest.TestCase):
         self.assertEqual(ev.eval("Math.round(-1.5F)"), -1)
         self.assertAlmostEqual(ev.eval_number("5 / 2.0F"), 2.5)
 
+    def test_multiple_static_final_declarators_are_extracted(self):
+        with tempfile.TemporaryDirectory() as td:
+            screen = Path(td) / "MultiConstantScreen.java"
+            screen.write_text(
+                """
+                class MultiConstantScreen {
+                    private static final int WIDTH = 256, HEIGHT = WIDTH * 3 / 4;
+                    private static final float SX = 0.8F, SY = SX;
+                    private static final int MIN = Math.max(10, 20), X = Math.round(MIN * SX);
+
+                    void render(GuiGraphics graphics) {
+                        graphics.drawString(font, "X", WIDTH - HEIGHT + X, 4, 0xFFFFFF);
+                    }
+                }
+                """,
+                encoding="utf-8",
+            )
+            doc = extract_java(screen)
+
+        text = next(e for e in doc["elements"] if e["type"] == "text")
+        # 256 - 192 + round(20 * 0.8)
+        self.assertEqual(text["x"], 80)
+
     def test_private_static_final_float_and_round_are_extracted(self):
         with tempfile.TemporaryDirectory() as td:
             screen = Path(td) / "ScaledScreen.java"

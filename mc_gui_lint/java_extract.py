@@ -500,11 +500,26 @@ def _extract_static_final_numeric_constants(
     visibility = r"public\s+" if public_only else r"(?:(?:public|protected|private)\s+)?"
     pattern = re.compile(
         r"\b" + visibility + r"static\s+final\s+"
-        r"(int|long|short|byte|float|double)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);"
+        r"(int|long|short|byte|float|double)\s+([^;]+);"
     )
-    declarations = [
-        (m.group(1), m.group(2), m.group(3).strip()) for m in pattern.finditer(code)
-    ]
+    declarations: list[tuple[str, str, str]] = []
+    for match in pattern.finditer(code):
+        type_name = match.group(1)
+        # A Java field declaration may contain multiple variable declarators:
+        #
+        #   static final int WIDTH = 256, HEIGHT = WIDTH * 3 / 4;
+        #
+        # Split only on top-level commas so commas inside calls such as
+        # Math.max(128, 256) remain part of the initializer expression.
+        for declarator in _split_args(match.group(2)):
+            variable = re.fullmatch(
+                r"([A-Za-z_]\w*)\s*=\s*(.+)", declarator, flags=re.S
+            )
+            if variable is None:
+                continue
+            declarations.append(
+                (type_name, variable.group(1), variable.group(2).strip())
+            )
     env: dict[str, int | float] = dict(base_env or {})
     resolved: dict[str, int | float] = {}
 

@@ -40,6 +40,22 @@ class CrossClassConstantTest(unittest.TestCase):
         self.assertNotIn("FleetCommandMenu.BOXED", constants)
         self.assertNotIn("FleetCommandMenu.RUNTIME", constants)
 
+    def test_public_multiple_declarators_and_nested_commas(self):
+        code = """
+        public final class LayoutConstants {
+            public static final int WIDTH = Math.max(128, 256), HEIGHT = WIDTH * 3 / 4;
+            public static final float SX = 0.8F, SY = SX;
+        }
+        """
+        constants = _extract_public_static_final_int_constants(
+            code,
+            "LayoutConstants",
+        )
+        self.assertEqual(constants["LayoutConstants.WIDTH"], 256)
+        self.assertEqual(constants["LayoutConstants.HEIGHT"], 192)
+        self.assertAlmostEqual(constants["LayoutConstants.SX"], 0.8)
+        self.assertAlmostEqual(constants["LayoutConstants.SY"], 0.8)
+
     def test_button_helper_accepts_menu_public_static_final_ids(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
